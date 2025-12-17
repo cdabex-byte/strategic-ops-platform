@@ -214,7 +214,7 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES
+# AI ENGINES (Definitive - Correct URLs + Enhanced Error Logging)
 # ============================================================================
 
 class MarketIntelligenceEngine:
@@ -222,171 +222,184 @@ class MarketIntelligenceEngine:
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
         if not self.gemini_key:
             st.error("❌ GEMINI_API_KEY not found in secrets")
+            self.enabled = False
+        else:
+            self.enabled = True
+        
+        # ✅ CORRECT API URL - use /v1/ and /models/
+        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={self.gemini_key}"
+        print(f"Using API URL: {self.api_url}")  # Debug
     
     async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
-        """Analyze competitor with safe API parsing"""
+        """Analyze competitor with enhanced error reporting"""
+        if not self.enabled:
+            return self._get_fallback(competitor, game, "API disabled")
+        
         prompt = f"""
-        As a strategy consultant, analyze {competitor} in the {game} AI coaching market.
-        
-        Provide a detailed JSON response with:
-        {{
-          "key_strengths": ["strength1", "strength2"],
-          "key_weaknesses": ["weakness1", "weakness2"],
-          "market_position": "dominant|challenger|niche",
-          "threat_level": 1-10,
-          "opportunity_windows": ["specific opportunity 1", "specific opportunity 2"],
-          "confidence_score": 0.0-1.0,
-          "sources": ["data source 1", "data source 2"]
-        }}
-        
-        Be specific and data-driven. Focus on actionable insights.
+        Analyze {competitor} in the {game} AI coaching market.
+        Provide JSON with: key_strengths, key_weaknesses, market_position, 
+        threat_level (1-10), opportunity_windows, confidence_score (0-1), sources.
         """
         
         try:
             async with httpx.AsyncClient() as client:
+                print(f"🚀 Making API call to: {self.api_url[:100]}...")
+                
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    self.api_url,
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.3,
+                            "maxOutputTokens": 2048,
+                            "topP": 0.95
+                        }
+                    },
                     timeout=30.0
                 )
                 
-                # SAFE PARSING
+                print(f"📡 Response status: {response.status_code}")
+                print(f"📡 Response text: {response.text[:200]}")
+                
                 if response.status_code != 200:
-                    raise Exception(f"API error: {response.status_code}")
+                    raise Exception(f"API {response.status_code}: {response.text}")
                 
                 data = response.json()
                 
-                # Check response structure
+                # Parse response
                 if "candidates" not in data or not data["candidates"]:
-                    raise Exception("No candidates in API response")
-                
-                if "content" not in data["candidates"][0]:
-                    raise Exception("No content in candidate")
-                
-                if "parts" not in data["candidates"][0]["content"]:
-                    raise Exception("No parts in content")
+                    raise Exception("No candidates in response")
                 
                 content = data["candidates"][0]["content"]["parts"][0].get("text", "")
                 if not content:
-                    raise Exception("Empty text content")
+                    raise Exception("Empty content")
                 
-                # Clean and parse JSON
+                # Extract JSON
                 cleaned = content.replace('```json', '').replace('```', '').strip()
                 analysis = json.loads(cleaned)
                 
                 return CompetitiveInsight(
                     competitor_name=competitor,
                     game=game,
-                    key_strengths=analysis['key_strengths'],
-                    key_weaknesses=analysis['key_weaknesses'],
+                    key_strengths=analysis['key_strengths'][:3],
+                    key_weaknesses=analysis['key_weaknesses'][:3],
                     market_position=analysis['market_position'],
-                    threat_level=analysis['threat_level'],
-                    opportunity_windows=analysis['opportunity_windows'],
-                    confidence_score=analysis['confidence_score'],
-                    sources=analysis['sources']
+                    threat_level=min(10, max(1, analysis['threat_level'])),
+                    opportunity_windows=analysis['opportunity_windows'][:3],
+                    confidence_score=min(1.0, max(0.0, analysis['confidence_score'])),
+                    sources=analysis['sources'][:2],
                 )
                 
         except Exception as e:
-            # Log the error and return fallback
-            st.warning(f"⚠️ AI analysis failed: {str(e)}")
+            error_msg = f"⚠️ AI failed: {str(e)}"
+            print(error_msg)
+            
+            # Log error to Sheets
             logger.log(
                 user="system",
                 action="ai_analysis_failed",
                 input_data={"competitor": competitor, "game": game},
                 status="error",
-                error=str(e),
+                error=error_msg,
                 session_id=st.session_state.session_id
             )
             
-            # Return fallback
-            return CompetitiveInsight(
-                competitor_name=competitor,
-                game=game,
-                key_strengths=["Strong brand recognition", "Large user base"],
-                key_weaknesses=["Limited AI personalization", "High pricing"],
-                market_position="challenger",
-                threat_level=6,
-                opportunity_windows=["Mobile expansion", "Esports team partnerships"],
-                confidence_score=0.7,
-                sources=["SteamSpy", "Twitch API"]
-            )
+            return self._get_fallback(competitor, game, str(e))
+    
+    def _get_fallback(self, competitor: str, game: GameTitle, error: str) -> CompetitiveInsight:
+        """Return fallback insight with error logged"""
+        st.warning(f"Using fallback: {error}")
+        return CompetitiveInsight(
+            competitor_name=competitor,
+            game=game,
+            key_strengths=["Strong brand", "Large base"],
+            key_weaknesses=["Limited AI", "High price"],
+            market_position="challenger",
+            threat_level=6,
+            opportunity_windows=["Mobile", "Esports"],
+            confidence_score=0.6,
+            sources=["Mock data", error[:50]],
+        )
 
 class OpportunitySizer:
     def __init__(self):
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        self.enabled = bool(self.gemini_key)
+        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={self.gemini_key}"
     
     async def calculate_market_size(self, game: GameTitle, segment: str, tier: str, geo: str) -> TAMAnalysis:
-        """Calculate TAM/SAM/SOM with AI-generated assumptions"""
+        """Calculate TAM/SAM/SOM"""
+        if not self.enabled:
+            return self._get_fallback(game, segment, "API disabled")
         
-        # Base market data (mock for POC)
-        market_data = {
-            GameTitle.LEAGUE_OF_LEGENDS: {"total_players": 150_000_000, "growth_rate": 0.05},
-            GameTitle.VALORANT: {"total_players": 25_000_000, "growth_rate": 0.15},
-            GameTitle.CS2: {"total_players": 35_000_000, "growth_rate": 0.03},
-        }
-        
-        base_data = market_data.get(game, {"total_players": 10_000_000, "growth_rate": 0.10})
-        
-        # AI-powered assumptions
         prompt = f"""
-        As a market analyst, provide realistic assumptions for:
-        - Game: {game}
-        - Segment: {segment}
-        - Pricing Tier: {tier}
-        - Geography: {geo}
-        
-        Return JSON with:
-        {{
-          "arpu": annual revenue per user (30-200),
-          "segment_penetration": percentage (0.01-0.30),
-          "confidence_score": 0.0-1.0,
-          "key_risks": ["risk1", "risk2"],
-          "growth_drivers": ["driver1", "driver2"]
-        }}
+        Market analysis for {game}, segment: {segment}, tier: {tier}, geo: {geo}.
+        Return JSON with arpu, segment_penetration (0.01-0.30), confidence_score (0-1).
         """
         
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
+                    self.api_url,
                     json={"contents": [{"parts": [{"text": prompt}]}]},
                     timeout=30.0
                 )
+                
+                if response.status_code != 200:
+                    raise Exception(f"API {response.status_code}")
+                
                 data = response.json()
-                assumptions = json.loads(data['candidates'][0]['content']['parts'][0]['text'].replace('```json', '').replace('```', ''))
-        except:
-            # Fallback
-            arpu_map = {"premium": 120, "mid": 60, "free": 0}
-            assumptions = {
-                "arpu": arpu_map.get(tier, 60),
-                "segment_penetration": 0.15,
-                "confidence_score": 0.6,
-                "key_risks": ["Market saturation", "Competitive pressure"],
-                "growth_drivers": ["Mobile gaming boom", "AI adoption"]
-            }
-        
-        # Calculations
-        total_players = base_data["total_players"]
-        arpu = assumptions["arpu"]
-        tam = total_players * arpu
-        penetration_rate = assumptions["segment_penetration"]
-        sam = int(tam * penetration_rate)
-        som = int(sam * 0.1)
-        
+                content = data["candidates"][0]["content"]["parts"][0]["text"]
+                cleaned = content.replace('```json', '').replace('```', '').strip()
+                assumptions = json.loads(cleaned)
+                
+                # Mock data (replace with real API calls)
+                total_players = 1_000_000
+                arpu = assumptions.get("arpu", 60)
+                tam = total_players * arpu
+                penetration = assumptions.get("segment_penetration", 0.15)
+                sam = int(tam * penetration)
+                som = int(sam * 0.1)
+                
+                return TAMAnalysis(
+                    game=game,
+                    total_players=total_players,
+                    serviceable_available_market=sam,
+                    serviceable_obtainable_market=som,
+                    avg_revenue_per_user=arpu,
+                    tam_usd=tam,
+                    sam_usd=sam,
+                    som_usd=som,
+                    growth_rate=0.10,
+                    assumptions=assumptions,
+                    confidence_score=assumptions.get("confidence_score", 0.6),
+                )
+                
+        except Exception as e:
+            logger.log(
+                user="system",
+                action="tam_calculation_failed",
+                input_data={"game": game, "segment": segment},
+                status="error",
+                error=str(e)[:200],
+                session_id=st.session_state.session_id
+            )
+            return self._get_fallback(game, segment, str(e))
+    
+    def _get_fallback(self, game: GameTitle, segment: str, error: str) -> TAMAnalysis:
         return TAMAnalysis(
             game=game,
-            total_players=total_players,
-            serviceable_available_market=sam,
-            serviceable_obtainable_market=som,
-            avg_revenue_per_user=arpu,
-            tam_usd=tam,
-            sam_usd=sam,
-            som_usd=som,
-            growth_rate=base_data["growth_rate"],
-            assumptions=assumptions,
-            confidence_score=assumptions["confidence_score"]
+            total_players=1_000_000,
+            serviceable_available_market=150_000,
+            serviceable_obtainable_market=15_000,
+            avg_revenue_per_user=60,
+            tam_usd=60_000_000,
+            sam_usd=9_000_000,
+            som_usd=900_000,
+            growth_rate=0.10,
+            assumptions={"error": error[:50]},
+            confidence_score=0.5,
         )
-
 # ============================================================================
 # STREAMLIT UI
 # ============================================================================
