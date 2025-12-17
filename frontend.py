@@ -305,7 +305,7 @@ class DatabaseManager:
 # ==================== AI Integration (Gemini 2.5 Flash) ====================
 
 class GeminiAI:
-    """Google Gemini 2.5 Flash for market research"""
+    """Google Gemini 2.5 Flash with proper safety settings and response validation"""
     
     def __init__(self):
         self.api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -316,8 +316,29 @@ class GeminiAI:
         if self.configured:
             try:
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel(self.model_name)
-                print(f"✅ {self.model_name} initialized")
+                self.model = genai.GenerativeModel(
+                    self.model_name,
+                    # ✅ EXPLICIT SAFETY SETTINGS - Allow more content
+                    safety_settings=[
+                        {
+                            "category": "HARM_CATEGORY_HARASSMENT",
+                            "threshold": "BLOCK_ONLY_HIGH"
+                        },
+                        {
+                            "category": "HARM_CATEGORY_HATE_SPEECH",
+                            "threshold": "BLOCK_ONLY_HIGH"
+                        },
+                        {
+                            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                            "threshold": "BLOCK_ONLY_HIGH"
+                        },
+                        {
+                            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                            "threshold": "BLOCK_ONLY_HIGH"
+                        }
+                    ]
+                )
+                print(f"✅ {self.model_name} initialized with safety settings")
                 self._test_connection()
             except Exception as e:
                 st.error(f"❌ Gemini Config Error: {str(e)}")
@@ -325,23 +346,33 @@ class GeminiAI:
                 self.configured = False
                 self.model = None
         else:
-            print("⚠️ No GEMINI_API_KEY")
-            st.sidebar.warning("⚠️ Gemini API key missing")
+            print("⚠️ No GEMINI_API_KEY found")
+            st.sidebar.warning("⚠️ Gemini API key missing - using fallback data")
             self.model = None
     
     def _test_connection(self):
-        """Test API connectivity"""
+        """Test API with response validation"""
         try:
             response = self.model.generate_content(
-                "Test response: OK",
-                generation_config=genai.GenerationConfig(max_output_tokens=10)
+                "Respond with 'Gemini OK' only",
+                generation_config=genai.GenerationConfig(
+                    max_output_tokens=10,
+                    temperature=0.1
+                )
             )
             
-            if response and hasattr(response, 'text') and "OK" in response.text:
-                print(f"✅ {self.model_name} test PASSED")
-                st.sidebar.success(f"✅ {self.model_name} Connected")
-            else:
-                raise ValueError(f"Bad response: {response}")
+            # ✅ VALIDATE RESPONSE before accessing .text
+            if not response or not hasattr(response, 'candidates') or not response.candidates:
+                raise ValueError("No response candidates returned")
+            
+            if response.candidates[0].finish_reason != 0:  # 0 = STOP
+                raise ValueError(f"Generation stopped. Reason: {response.candidates[0].finish_reason}")
+            
+            if not response.text:
+                raise ValueError("Empty response text")
+            
+            print(f"✅ {self.model_name} test PASSED: {response.text.strip()}")
+            st.sidebar.success(f"✅ {self.model_name} Connected")
                 
         except Exception as e:
             st.sidebar.error(f"❌ Test Failed: {e}")
@@ -349,34 +380,46 @@ class GeminiAI:
             self.configured = False
     
     async def analyze_opportunity(self, opportunity: str) -> tuple[Dict[str, Any], str]:
-        """Generate unique market analysis"""
+        """Generate analysis with response validation"""
         
         if not self.configured:
-            st.warning("⚠️ Using fallback data")
+            st.warning("⚠️ Using fallback data - Gemini not configured")
+            if self.last_error:
+                st.error(f"Last error: {self.last_error}")
             return self._get_fallback_data(opportunity), self._generate_fallback_briefing(opportunity)
         
-        cache_key = f"gemini25_{hash(opportunity)}"
+        cache_key = f"gemini25_{hash(opportunity + str(datetime.now().timestamp()))}"
         cached = db.get_ai_analysis(cache_key)
         if cached:
-            st.info("ℹ️ Using cached analysis")
+            st.info("ℹ️ Using cached AI analysis")
             return cached["analysis"], cached["briefing"]
         
+        # ✅ SIMPLIFIED, SAFE PROMPT
         prompt = f"""
-Analyze business opportunity for Trophi.ai: {opportunity}
+You are analyzing a business opportunity for Trophi.ai, an AI gaming coaching platform.
 
-Generate JSON with:
-- market_size_millions (50-500)
-- growth_rate_percent (5-40)
-- competitors list
-- trophi_fit_score_0_to_1 (0.2-0.9)
-- priority level
-- budget_estimate
-- roi_multiple
-- game_title_fit
-- 2 metrics
-- 2 risks
+Opportunity: {opportunity}
 
-Format: {{"market_size": 0, ...}} then BRIEFING: your analysis.
+Context: Target - {st.session_state.get('target_segment', 'Pro Players')} in {st.session_state.get('target_region', 'Global')} within {st.session_state.get('timeline', '3-6 months')}
+
+Generate a JSON response with these fields:
+- market_size_millions (integer, 50-500)
+- growth_rate_percent (float, 5-40)
+- target_audience (string)
+- top_competitors (array of 2 strings)
+- trophi_fit_score_0_to_1 (float, 0.2-0.9)
+- priority_level (string: high/medium/low)
+- estimated_budget_usd (integer, 20000-150000)
+- expected_roi_multiple (float, 1.5-4.5)
+- best_game_title_fit (string: CS2/VALORANT/League_of_Legends)
+- key_metrics (array of 2 strings)
+- key_risks (array of 2 strings)
+
+After the JSON, write "BRIEFING:" followed by a 2-sentence executive summary.
+
+Example format:
+{{"market_size_millions": 150, "growth_rate_percent": 12.5, ...}}
+BRIEFING: This opportunity targets...
 """
         
         try:
@@ -385,41 +428,65 @@ Format: {{"market_size": 0, ...}} then BRIEFING: your analysis.
                     self.model.generate_content,
                     prompt,
                     generation_config=genai.GenerationConfig(
-                        temperature=0.95,
-                        max_output_tokens=2000
+                        temperature=0.9,
+                        max_output_tokens=2000,
+                        candidate_count=1
                     )
                 )
             
-            result_text = response.text
+            # ✅ VALIDATE RESPONSE
+            if not response or not response.candidates:
+                raise ValueError("Empty response from API")
+            
+            if response.candidates[0].finish_reason != 0:
+                st.error(f"❌ Generation blocked. Finish reason: {response.candidates[0].finish_reason}")
+                st.info("Try simplifying your prompt or adjusting safety settings")
+                raise ValueError(f"Generation blocked: {response.candidates[0].finish_reason}")
+            
+            result_text = response.text.strip()
+            
+            if not result_text:
+                raise ValueError("Empty response text")
             
             # Parse JSON
             json_start = result_text.find("{")
-            json_end = result_text.rfind("}") + 1
-            if json_start != -1 and json_end != -1:
-                json_str = result_text[json_start:json_end]
+            json_end = result_text.find("}") + 1
+            
+            if json_start == -1 or json_end == 0:
+                raise ValueError("No JSON object found in response")
+            
+            json_str = result_text[json_start:json_end]
+            
+            try:
                 analysis_data = json.loads(json_str)
-                
-                # Extract briefing
-                briefing_marker = "BRIEFING:"
-                briefing_start = result_text.find(briefing_marker)
-                if briefing_start != -1:
-                    briefing = result_text[briefing_start + len(briefing_marker):].strip()
-                else:
-                    briefing = f"Briefing for {analysis_data.get('title', 'opportunity')}"
-                
-                db.save_ai_analysis(cache_key, analysis_data, briefing)
-                st.success("✅ Analysis complete!")
-                return analysis_data, briefing
+            except json.JSONDecodeError as je:
+                st.error("❌ Invalid JSON format in AI response")
+                print(f"JSON Error: {je}")
+                print(f"Problematic JSON: {json_str}")
+                raise ValueError(f"JSON parse error: {je}")
+            
+            # Extract briefing
+            briefing_marker = "BRIEFING:"
+            briefing_start = result_text.find(briefing_marker)
+            
+            if briefing_start != -1:
+                briefing = result_text[briefing_start + len(briefing_marker):].strip()
             else:
-                raise ValueError("No JSON found")
-                
+                briefing = f"Briefing for {analysis_data.get('opportunity_title', 'opportunity')}"
+            
+            # Cache and return
+            db.save_ai_analysis(cache_key, analysis_data, briefing)
+            st.success("✅ Gemini 2.5 analysis complete!")
+            return analysis_data, briefing
+            
         except Exception as e:
-            print(f"❌ Generation error: {e}")
-            st.error(f"AI error: {str(e)}")
+            print(f"❌ AI Generation Error: {e}")
+            st.error(f"❌ Analysis failed: {str(e)}")
             return self._get_fallback_data(opportunity), self._generate_fallback_briefing(opportunity)
     
     def _get_fallback_data(self, opportunity: str) -> Dict[str, Any]:
-        """Enhanced fallback with variation"""
+        """Enhanced fallback data"""
+        # ... (keep existing fallback method)
         hash_val = int(hashlib.md5(opportunity.encode()).hexdigest(), 16)
         lower_opp = opportunity.lower()
         
@@ -434,44 +501,31 @@ Format: {{"market_size": 0, ...}} then BRIEFING: your analysis.
         priorities = ["high", "medium", "low"]
         
         return {
-            "title": f"Fallback: {opportunity[:50]}",
+            "opportunity_title": f"Fallback: {opportunity[:60]}",
             "market_size": market_size,
-            "growth_rate": 15 + (hash_val % 25),
-            "audience": f"{opportunity.split()[0] if opportunity else 'Gaming'} players",
-            "competitors": [f"Platform {hash_val % 5}", f"Tool {hash_val % 7}"],
-            "fit_score": fit_score,
+            "market_growth_rate": 15 + (hash_val % 25),
+            "target_audience": f"{opportunity.split()[0] if opportunity else 'Gaming'} players",
+            "competitive_landscape": [f"Platform {hash_val % 5}", f"Tool {hash_val % 7}"],
+            "key_trends": ["AI adoption", "Esports growth"],
+            "trophi_fit_score": fit_score,
+            "recommendation": "Validate with pilot program",
+            "risks": [f"Market validation for {opportunity[:20]}", "Competition"],
+            "budget_estimate": 50000 + ((hash_val % 100) * 1000),
+            "roi_potential": 2.0 + fit_score,
+            "game_title_fit": games[hash_val % 3],
             "priority": priorities[hash_val % 3],
-            "budget": 50000 + ((hash_val % 100) * 1000),
-            "roi": 2.0 + fit_score,
-            "game": games[hash_val % 3],
-            "metrics": ["Users", "Engagement"]
+            "metrics_to_track": ["User acquisition", "Engagement", f"{opportunity.split()[0]} conversion"] if opportunity else ["Engagement"]
         }
     
     def _generate_fallback_briefing(self, opportunity: str) -> str:
         return f"""
 # ⚠️ FALLBACK MODE - AI NOT CONFIGURED
 
-**Opportunity:** {opportunity[:80]}
-
-## Status
-Using static fallback data.
-
-## Fix
-1. Get key: https://makersuite.google.com
-2. Add to `.streamlit/secrets.toml`
-
-```toml
-GEMINI_API_KEY = "your_key"
-```
-3. Redeploy
-
-## Generic Analysis
-Opportunity shows potential. Validation recommended.
-"""
-
-# Initialize
-ai_engine = GeminiAI()
-
+To enable real AI analysis:
+1. Get Gemini API key: https://makersuite.google.com
+2. Add to `.streamlit/secrets.toml`:
+   ```toml
+   GEMINI_API_KEY = "your_key_here"
 # ==================== API Integrations ====================
 
 class SteamSpyAPI:
