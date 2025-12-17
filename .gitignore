@@ -1,4 +1,4 @@
-# Secrets & env
+# Secrets
 .streamlit/secrets.toml
 .env
 service_account.json
@@ -6,9 +6,8 @@ service_account.json
 # Python
 __pycache__/
 *.py[cod]
-venv/
 *.db
+venv/
 
 # OS
 .DS_Store
-Thumbs.db
