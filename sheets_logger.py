@@ -1,6 +1,5 @@
 """
-Google Sheets Logger - Handles auth and logging
-Works in both backend (FastAPI) and frontend (Streamlit)
+Google Sheets Logger for Streamlit Cloud
 """
 
 import json
@@ -12,7 +11,6 @@ class SheetsLogger:
         self.enabled = False
         
         try:
-            # This will work in Streamlit Cloud
             sa_info = st.secrets["service_account"]
             sheet_id = st.secrets["SHEET_ID"]
             
@@ -29,7 +27,7 @@ class SheetsLogger:
             self.sheet = self.client.open_by_key(sheet_id).sheet1
             self.enabled = True
             
-            # Auto-create headers if sheet empty
+            # Create headers if empty
             if not self.sheet.get_all_values():
                 headers = [
                     "Timestamp", "User", "Action", "Input", "Output",
@@ -40,13 +38,11 @@ class SheetsLogger:
             print("✅ Sheets logger connected")
             
         except Exception as e:
-            print(f"⚠️ Sheets logger disabled: {e} (mock mode)")
+            print(f"⚠️ Sheets logger disabled: {e}")
     
     def log(self, **kwargs):
-        """Log to Google Sheets with retry logic"""
         if not self.enabled:
-            # Mock logging for development
-            print(f"MOCK LOG: {kwargs.get('action')} by {kwargs.get('user')}")
+            print(f"MOCK LOG: {kwargs.get('action')}")
             return
         
         row = [
@@ -68,11 +64,9 @@ class SheetsLogger:
         except Exception as e:
             print(f"Logging failed: {e}")
 
-# Global instance
 _sheets_logger_instance = None
 
 def get_logger():
-    """Singleton pattern"""
     global _sheets_logger_instance
     if _sheets_logger_instance is None:
         _sheets_logger_instance = SheetsLogger()
