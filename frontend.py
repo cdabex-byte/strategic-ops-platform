@@ -103,7 +103,7 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES (Direct API Calls)
+# AI ENGINES
 # ============================================================================
 
 class MarketIntelligenceEngine:
@@ -111,7 +111,7 @@ class MarketIntelligenceEngine:
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
     
     async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
-        """Analyze competitor directly from Streamlit (no backend)"""
+        """Analyze competitor directly from Streamlit"""
         prompt = f"""
         As a strategy consultant, analyze {competitor} in the {game} AI coaching market.
         
@@ -171,7 +171,7 @@ class OpportunitySizer:
     async def calculate_market_size(self, game: GameTitle, segment: str, tier: str, geo: str) -> TAMAnalysis:
         """Calculate TAM/SAM/SOM with AI-generated assumptions"""
         
-        # Base market data (mock for POC, replace with real API calls in production)
+        # Base market data (mock for POC)
         market_data = {
             GameTitle.LEAGUE_OF_LEGENDS: {"total_players": 150_000_000, "growth_rate": 0.05},
             GameTitle.VALORANT: {"total_players": 25_000_000, "growth_rate": 0.15},
@@ -180,7 +180,7 @@ class OpportunitySizer:
         
         base_data = market_data.get(game, {"total_players": 10_000_000, "growth_rate": 0.10})
         
-        # AI-powered assumptions generation
+        # AI-powered assumptions
         prompt = f"""
         As a market analyst, provide realistic assumptions for:
         - Game: {game}
@@ -208,7 +208,7 @@ class OpportunitySizer:
                 data = response.json()
                 assumptions = json.loads(data['candidates'][0]['content']['parts'][0]['text'].replace('```json', '').replace('```', ''))
         except:
-            # Fallback assumptions
+            # Fallback
             arpu_map = {"premium": 120, "mid": 60, "free": 0}
             assumptions = {
                 "arpu": arpu_map.get(tier, 60),
@@ -224,7 +224,7 @@ class OpportunitySizer:
         tam = total_players * arpu
         penetration_rate = assumptions["segment_penetration"]
         sam = int(tam * penetration_rate)
-        som = int(sam * 0.1)  # Conservative 10% obtainable
+        som = int(sam * 0.1)
         
         return TAMAnalysis(
             game=game,
@@ -241,7 +241,7 @@ class OpportunitySizer:
         )
 
 # ============================================================================
-# HUMAN REVIEW STORAGE
+# DATABASE HELPERS
 # ============================================================================
 
 def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
@@ -317,16 +317,14 @@ with st.sidebar:
     st.header("👤 User Configuration")
     st.session_state.user = st.text_input("Your Name", "Strategy Analyst")
     
-    st.markdown("---")
-    
     # Logging status
     if logger.enabled:
-        st.success("✅ Logging to Google Sheets")
+        st.success("✅ Sheets Logging Active")
     else:
-        st.warning("⚠️ Logging: Mock Mode (Demo)")
+        st.warning("⚠️ Sheets Logging: Mock Mode")
         st.caption("Add secrets to enable real logging")
     
-    st.caption(f"Session: {st.session_state.session_id}")
+    st.caption(f"Session ID: {st.session_state.session_id}")
 
 # ============================================================================
 # TABS - ALL FEATURES
@@ -532,8 +530,9 @@ with tab3:
                         key=f"notes_{review['id']}"
                     )
                 with col2:
- reviewer = st.text_input("Reviewer", st.session_state.user, key=f"reviewer_{review['id']}")
-                    
+                    # FIXED INDENTATION (this was the bug)
+                    reviewer = st.text_input("Reviewer", st.session_state.user, key=f"reviewer_{review['id']}")
+                
                 col1, col2, col3 = st.columns(3)
                 if col1.button("✅ Approve", key=f"approve_{review['id']}"):
                     update_review(review['id'], "approved", reviewer, notes)
@@ -574,7 +573,7 @@ with tab3:
                     st.info("📝 Modification requested & logged")
 
 # ============================================================================
-# FOOTER
+# FOOTER & METRICS
 # ============================================================================
 
 st.sidebar.markdown("---")
