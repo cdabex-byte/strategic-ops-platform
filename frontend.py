@@ -580,7 +580,7 @@ with tab3:
                         session_id=st.session_state.session_id
                     )
                     st.success("✅ Review approved & logged")
-                    st.experimental_rerun()
+                   
                 
                 if col2.button("❌ Reject", key=f"reject_{review['id']}"):
                     update_review(review['id'], "rejected", reviewer, notes)
@@ -593,7 +593,7 @@ with tab3:
                         session_id=st.session_state.session_id
                     )
                     st.warning("❌ Review rejected & logged")
-                    st.experimental_rerun()
+                   
                 
                 if col3.button("📝 Modify", key=f"modify_{review['id']}"):
                     update_review(review['id'], "modify", reviewer, notes)
