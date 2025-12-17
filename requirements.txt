@@ -1,9 +1,7 @@
-# Core stack - 8 packages, installs in 10 seconds
-fastapi==0.115.0
-uvicorn==0.32.0
+# Single app - no backend needed
+streamlit==1.41.0
 httpx==0.27.2
 pydantic==2.9.2
-streamlit==1.41.0
 gspread==6.1.2
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
