@@ -33,6 +33,38 @@ if 'user' not in st.session_state:
 from sheets_logger import get_logger
 
 logger = get_logger()  # Will connect to Sheets if secrets available
+# ============================================================================
+# 🔍 DEBUGGING PANEL - Add this to sidebar (after logger init)
+# ============================================================================
+
+with st.sidebar.expander("🐞 Logging Debug", expanded=True):
+    st.write("Logger Status:", "✅ Enabled" if logger.enabled else "❌ Disabled")
+    
+    # Show secrets checks
+    try:
+        st.write("Gemini Key Present:", bool(st.secrets.get("GEMINI_API_KEY")))
+        st.write("Sheet ID Present:", bool(st.secrets.get("SHEET_ID")))
+        st.write("Service Account Present:", bool(st.secrets.get("service_account")))
+    except:
+        st.error("❌ Secrets.toml not configured")
+    
+    # Manual test button
+    if st.button("🧪 Force Test Log"):
+        try:
+            logger.log(
+                user="debug_user",
+                action="manual_test",
+                input_data={"test": True, "timestamp": str(datetime.now())},
+                output_data={"status": "forced_test"},
+                model="debug",
+                status="success",
+                session_id=st.session_state.session_id
+            )
+            st.success("✅ Test log attempted - refresh sheet in 5 seconds")
+        except Exception as e:
+            st.error(f"❌ Logging failed: {e}")
+
+# ============================================================================
 
 # ============================================================================
 # DATABASE HELPERS (Fixed - No Module-Level Calls)
