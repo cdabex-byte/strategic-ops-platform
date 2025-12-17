@@ -849,6 +849,32 @@ page = st.sidebar.radio(
 if page == "🔍 AI Opportunity Analysis":
     st.title("🔍 AI-Powered Opportunity Analysis")
     
+    with st.expander("🐞 AI Debug Info", expanded=not ai_engine.configured):
+    st.json({
+        "Gemini Configured": ai_engine.configured,
+        "API Key Present": bool(st.secrets.get("GEMINI_API_KEY")),
+        "Model Loaded": ai_engine.model is not None,
+        "Last Error": ai_engine.last_error,
+        "Connection Status": "Connected" if ai_engine.configured else "Not Connected"
+    })
+    
+    if st.button("🔍 Test AI Connection"):
+        if ai_engine.configured:
+            with st.spinner("Testing AI connection..."):
+                try:
+                    test_prompt = "Analyze: AI coaching for CS2 pro players in Europe"
+                    analysis, briefing = asyncio.run(ai_engine.analyze_opportunity(test_prompt))
+                    
+                    if "FALLBACK" in briefing:
+                        st.error("❌ Still using fallback - API key may be invalid")
+                    else:
+                        st.success("✅ AI is generating unique responses!")
+                        st.json(analysis)
+                except Exception as e:
+                    st.error(f"❌ Test failed: {e}")
+        else:
+            st.error("❌ AI not configured")
+            
     if not ai_engine.configured:
         st.error("⚠️ Gemini AI not configured. Add GEMINI_API_KEY to secrets.toml")
         st.info("Get free API key at: https://makersuite.google.com")
