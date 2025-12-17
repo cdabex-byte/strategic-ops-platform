@@ -1,6 +1,6 @@
 """
 Strategic Operations Platform - Single File Deployment
-Everything runs in Streamlit Cloud: UI, AI calls, logging, SQLite
+Everything runs in Streamlit Cloud: UI, AI, Logging, Database
 """
 
 import streamlit as st
@@ -34,21 +34,16 @@ from sheets_logger import get_logger
 logger = get_logger()  # Will connect to Sheets if secrets available
 
 # ============================================================================
-# SQLITE DATABASE (In-Process)
+# DATABASE HELPERS (Fixed - No Caching, Proper Connection Management)
 # ============================================================================
 
-# ✅ KEEP THIS - Lazy initialization
-@st.cache_resource
 def get_db():
-    """Get SQLite connection (cached per session)"""
+    """Get a NEW SQLite connection (do NOT cache)"""
     import os
-    # Ensure /tmp exists (Streamlit Cloud requirement)
-    os.makedirs("/tmp", exist_ok=True)
-    
+    os.makedirs("/tmp", exist_ok=True)  # Ensure directory exists
     conn = sqlite3.connect("/tmp/strategic_ops.db", check_same_thread=False)
-    cursor = conn.cursor()
-    
     # Create tables if they don't exist
+    cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reviews (
             id TEXT PRIMARY KEY,
@@ -62,11 +57,75 @@ def get_db():
             created_at TEXT NOT NULL
         )
     """)
-    
     conn.commit()
     return conn
 
-# ❌ NO init_db() call at module level!
+def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
+    """Store AI-generated content for human review - with proper connection handling"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reviews (id, item_type, item_id, generated_content, reviewer_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
+            item_type,
+            item_id,
+            json.dumps(content),
+            reviewer_notes,
+            datetime.now().isoformat()
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_pending_reviews() -> List[Dict[str, Any]]:
+    """Get all pending reviews - with proper connection handling"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM reviews WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    
+    return [
+        {
+            "id": row[0],
+            "item_type": row[1],
+            "item_id": row[2],
+            "generated_content": json.loads(row[3]),
+            "reviewer_notes": row[4],
+            "status": row[5],
+            "reviewed_by": row[6],
+            "reviewed_at": row[7],
+            "created_at": row[8]
+        }
+        for row in rows
+    ]
+
+def update_review(review_id: str, status: str, reviewer: str, notes: str = None):
+    """Update review status - with proper connection handling"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE reviews 
+            SET status = ?, reviewed_by = ?, reviewer_notes = ?, reviewed_at = ?
+            WHERE id = ?
+        """, (
+            status,
+            reviewer,
+            notes,
+            datetime.now().isoformat(),
+            review_id
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+# ✅ NO init_db() call at module level - Tables created on first use
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -105,15 +164,17 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES
+# AI ENGINES (Fixed - Better Error Handling)
 # ============================================================================
 
 class MarketIntelligenceEngine:
     def __init__(self):
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not self.gemini_key:
+            st.error("❌ GEMINI_API_KEY not found in secrets")
     
     async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
-        """Analyze competitor directly from Streamlit"""
+        """Analyze competitor with safe API parsing"""
         prompt = f"""
         As a strategy consultant, analyze {competitor} in the {game} AI coaching market.
         
@@ -138,8 +199,30 @@ class MarketIntelligenceEngine:
                     json={"contents": [{"parts": [{"text": prompt}]}]},
                     timeout=30.0
                 )
+                
+                # SAFE PARSING
+                if response.status_code != 200:
+                    raise Exception(f"API error: {response.status_code}")
+                
                 data = response.json()
-                analysis = json.loads(data['candidates'][0]['content']['parts'][0]['text'].replace('```json', '').replace('```', ''))
+                
+                # Check response structure
+                if "candidates" not in data or not data["candidates"]:
+                    raise Exception("No candidates in API response")
+                
+                if "content" not in data["candidates"][0]:
+                    raise Exception("No content in candidate")
+                
+                if "parts" not in data["candidates"][0]["content"]:
+                    raise Exception("No parts in content")
+                
+                content = data["candidates"][0]["content"]["parts"][0].get("text", "")
+                if not content:
+                    raise Exception("Empty text content")
+                
+                # Clean and parse JSON
+                cleaned = content.replace('```json', '').replace('```', '').strip()
+                analysis = json.loads(cleaned)
                 
                 return CompetitiveInsight(
                     competitor_name=competitor,
@@ -152,8 +235,20 @@ class MarketIntelligenceEngine:
                     confidence_score=analysis['confidence_score'],
                     sources=analysis['sources']
                 )
+                
         except Exception as e:
-            st.warning(f"AI analysis failed, using fallback: {e}")
+            # Log the error and return fallback
+            st.warning(f"⚠️ AI analysis failed: {str(e)}")
+            logger.log(
+                user="system",
+                action="ai_analysis_failed",
+                input_data={"competitor": competitor, "game": game},
+                status="error",
+                error=str(e),
+                session_id=st.session_state.session_id
+            )
+            
+            # Return fallback
             return CompetitiveInsight(
                 competitor_name=competitor,
                 game=game,
@@ -163,7 +258,7 @@ class MarketIntelligenceEngine:
                 threat_level=6,
                 opportunity_windows=["Mobile expansion", "Esports team partnerships"],
                 confidence_score=0.7,
-                sources=["SteamSpy", "Twitch API", "News scraping"]
+                sources=["SteamSpy", "Twitch API"]
             )
 
 class OpportunitySizer:
@@ -241,68 +336,6 @@ class OpportunitySizer:
             assumptions=assumptions,
             confidence_score=assumptions["confidence_score"]
         )
-
-# ============================================================================
-# DATABASE HELPERS
-# ============================================================================
-
-def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
-    """Store AI-generated content for human review"""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO reviews (id, item_type, item_id, generated_content, reviewer_notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
-        item_type,
-        item_id,
-        json.dumps(content),
-        reviewer_notes,
-        datetime.now().isoformat()
-    ))
-    conn.commit()
-
-def get_pending_reviews() -> List[Dict[str, Any]]:
-    """Get all pending reviews"""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM reviews WHERE status = 'pending' ORDER BY created_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    return [
-        {
-            "id": row[0],
-            "item_type": row[1],
-            "item_id": row[2],
-            "generated_content": json.loads(row[3]),
-            "reviewer_notes": row[4],
-            "status": row[5],
-            "reviewed_by": row[6],
-            "reviewed_at": row[7],
-            "created_at": row[8]
-        }
-        for row in rows
-    ]
-
-def update_review(review_id: str, status: str, reviewer: str, notes: str = None):
-    """Update review status"""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE reviews 
-        SET status = ?, reviewed_by = ?, reviewer_notes = ?, reviewed_at = ?
-        WHERE id = ?
-    """, (
-        status,
-        reviewer,
-        notes,
-        datetime.now().isoformat(),
-        review_id
-    ))
-    conn.commit()
-    conn.close()
 
 # ============================================================================
 # STREAMLIT UI
@@ -532,7 +565,7 @@ with tab3:
                         key=f"notes_{review['id']}"
                     )
                 with col2:
-                    # FIXED INDENTATION (this was the bug)
+                    # FIXED INDENTATION
                     reviewer = st.text_input("Reviewer", st.session_state.user, key=f"reviewer_{review['id']}")
                 
                 col1, col2, col3 = st.columns(3)
