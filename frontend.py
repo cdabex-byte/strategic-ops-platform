@@ -699,3 +699,42 @@ if 'session_start_logged' not in st.session_state:
         session_id=st.session_state.session_id
     )
     st.session_state.session_start_logged = True
+
+# ============================================================================
+# 🧪 END-TO-END TEST (Delete after verifying)
+# ============================================================================
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧪 End-to-End Test")
+
+if st.sidebar.button("🔥 Full System Test"):
+    # 1. Test Gemini API
+    try:
+        engine = MarketIntelligenceEngine()
+        test_insight = asyncio.run(engine.analyze_competitor("Test", GameTitle.CS2))
+        st.sidebar.success("✅ Gemini API working")
+    except Exception as e:
+        st.sidebar.error(f"❌ Gemini API failed: {e}")
+    
+    # 2. Test Google Sheets
+    try:
+        logger.log(
+            user="test_user",
+            action="e2e_test",
+            input_data={"test": True},
+            output_data={"result": "success"},
+            model="test",
+            status="success",
+            session_id=st.session_state.session_id
+        )
+        st.sidebar.success("✅ Sheets logging attempted")
+    except Exception as e:
+        st.sidebar.error(f"❌ Sheets logging failed: {e}")
+    
+    # 3. Test SQLite
+    try:
+        store_review("test", "test-item", {"test": True}, "Test notes")
+        reviews = get_pending_reviews()
+        st.sidebar.success(f"✅ SQLite working ({len(reviews)} reviews)")
+    except Exception as e:
+        st.sidebar.error(f"❌ SQLite failed: {e}")
