@@ -323,115 +323,79 @@ class GeminiAI:
             self.model = None
     
     async def analyze_opportunity(self, opportunity: str) -> tuple[Dict[str, Any], str]:
-        """
-        AI-powered market research and Trophi.ai fit analysis
-        Returns: (analysis_dict, briefing_text)
-        """
+        """AI-powered market research and Trophi.ai fit analysis"""
         
         if not self.configured:
             fallback_briefing = self._generate_fallback_briefing(opportunity)
             return self._get_fallback_data(opportunity), fallback_briefing
         
-        # Check cache first
         cache_key = f"opp_{hash(opportunity)}"
         cached = db.get_ai_analysis(cache_key)
         if cached:
             return cached["analysis"], cached["briefing"]
         
-        # Enhanced prompt for varied results
-        prompt = f'''
-        You are a senior Strategy & Operations Associate at Trophi.ai, an AI coaching platform for competitive gamers.
-        
-        **TASK:** Analyze this business opportunity and provide UNIQUE, specific market research.
-        
-        **OPPORTUNITY:** {opportunity}
-        
-        **REQUIREMENTS:**
-        1. Research ACTUAL market data specific to this opportunity
-        2. Identify REAL competitors in this space
-        3. Calculate specific market sizing (don't use generic numbers)
-        4. Provide Trophi.ai fit assessment based on:
-           - Gaming market alignment
-           - AI coaching applicability
-           - Our competitive advantages
-           - Technical feasibility
-        
-        **OUTPUT FORMAT:**
-        
-        First, provide a detailed executive briefing (narrative format):
-        BRIEFING_START
-        # Executive Briefing: [Opportunity Title]
-        
-        ## Market Overview
-        [Specific market size, growth rate, and key drivers relevant to {opportunity}]
-        
-        ## Competitive Landscape
-        [Specific competitors and their market positions]
-        
-        ## Trophi.ai Strategic Fit
-        [Detailed analysis of how this aligns with Trophi.ai's mission and capabilities]
-        
-        ## Recommendation
-        [Specific, actionable recommendation with rationale]
-        
-        ## Key Risks & Mitigation
-        [Specific risks and how to mitigate them]
-        BRIEFING_END
-        
-        Then, provide structured data in this JSON format:
-        JSON_START
-        {{
-            "opportunity_title": "Brief specific title",
-            "market_size": 0,  
-            "market_growth_rate": 0.0,
-            "target_audience": "Specific demographic description",
-            "competitive_landscape": ["Real Competitor 1", "Real Competitor 2"],
-            "key_trends": ["Specific trend 1", "Specific trend 2"],
-            "trophi_fit_score": 0.0,
-            "recommendation": "Specific recommendation",
-            "risks": ["Specific risk 1", "Specific risk 2"],
-            "budget_estimate": 0,
-            "roi_potential": 0.0,
-            "game_title_fit": "CS2 or VALORANT or League of Legends",
-            "priority": "high/medium/low",
-            "metrics_to_track": ["Specific metric 1", "Specific metric 2"]
-        }}
-        JSON_END
-        
-        **IMPORTANT:** Make the analysis SPECIFIC to "{opportunity}" - don't use generic templates.
-        """
+        # FIXED: Use raw string to avoid f-string conflicts
+        prompt = (
+            "You are a senior Strategy and Operations Associate at Trophi.ai.\n"
+            f"Analyze this opportunity: {opportunity}\n\n"
+            "Provide market size (millions USD), growth rate (%), target audience, "
+            "2-3 competitors, Trophi fit score (0-1), priority, budget, ROI multiple, "
+            "game fit (CS2/VALORANT/League of Legends), and metrics.\n\n"
+            "Format:\n"
+            "BRIEFING_START\n"
+            "# Executive Briefing\n\n"
+            "[Narrative analysis]\n\n"
+            "BRIEFING_END\n\n"
+            "JSON_START\n"
+            "{\n"
+            '  "opportunity_title": "Title",\n'
+            '  "market_size": 0,\n'
+            '  "market_growth_rate": 0.0,\n'
+            '  "target_audience": "Description",\n'
+            '  "competitive_landscape": ["Comp1", "Comp2"],\n'
+            '  "key_trends": ["Trend1", "Trend2"],\n'
+            '  "trophi_fit_score": 0.0,\n'
+            '  "recommendation": "Specific rec",\n'
+            '  "risks": ["Risk1", "Risk2"],\n'
+            '  "budget_estimate": 0,\n'
+            '  "roi_potential": 0.0,\n'
+            '  "game_title_fit": "CS2",\n'
+            '  "priority": "medium",\n'
+            '  "metrics_to_track": ["Metric1", "Metric2"]\n'
+            "}\n"
+            "JSON_END"
+        )
         
         try:
-            # Make API call
             response = await asyncio.to_thread(
                 self.model.generate_content,
                 prompt,
                 generation_config=genai.GenerationConfig(
-                    temperature=0.7,  # Higher temperature for more variation
+                    temperature=0.7,
                     max_output_tokens=2000
                 )
             )
             
-            # Parse response
             result_text = response.text
             
-            # Extract briefing and JSON
-            briefing_start = result_text.find("BRIEFING_START") + len("BRIEFING_START")
+            # Extract briefing
+            briefing_start = result_text.find("BRIEFING_START")
             briefing_end = result_text.find("BRIEFING_END")
-            briefing = result_text[briefing_start:briefing_end].strip() if briefing_start > 0 and briefing_end > 0 else "No briefing generated."
+            if briefing_start != -1 and briefing_end != -1:
+                briefing = result_text[briefing_start + len("BRIEFING_START"):briefing_end].strip()
+            else:
+                briefing = self._generate_fallback_briefing(opportunity)
             
-            json_start = result_text.find("JSON_START") + len("JSON_START")
+            # Extract JSON
+            json_start = result_text.find("JSON_START")
             json_end = result_text.find("JSON_END")
-            json_str = result_text[json_start:json_end].strip() if json_start > 0 and json_end > 0 else ""
-            
-            if json_str:
+            if json_start != -1 and json_end != -1:
+                json_str = result_text[json_start + len("JSON_START"):json_end].strip()
                 analysis = json.loads(json_str)
             else:
                 analysis = self._get_fallback_data(opportunity)
             
-            # Save to cache
             db.save_ai_analysis(cache_key, analysis, briefing)
-            
             return analysis, briefing
             
         except Exception as e:
@@ -440,33 +404,57 @@ class GeminiAI:
             return self._get_fallback_data(opportunity), fallback_briefing
     
     def _get_fallback_data(self, opportunity: str) -> Dict[str, Any]:
-        """Generate varied fallback data based on opportunity text"""
-        # Hash the opportunity to generate consistent but varied fallback data
+        """Generate varied fallback data"""
         import hashlib
-        
         hash_val = int(hashlib.md5(opportunity.encode()).hexdigest(), 16)
-        market_size = 50 + (hash_val % 200)  # 50-250M range
-        fit_score = ((hash_val % 100) / 100) * 0.6 + 0.2  # 0.2-0.8 range
+        market_size = 50 + (hash_val % 200)
+        fit_score = ((hash_val % 100) / 100) * 0.6 + 0.2
         
         games = ["CS2", "VALORANT", "LEAGUE_OF_LEGENDS"]
         priorities = ["high", "medium", "low"]
         
         return {
-            "opportunity_title": f"Analysis: {opportunity[:60]}...",
+            "opportunity_title": opportunity[:60],
             "market_size": market_size,
             "market_growth_rate": 15.5 + (hash_val % 15),
             "target_audience": "Competitive gamers aged 16-30",
-            "competitive_landscape": ["Traditional coaching platforms", "In-game analytics tools"],
-            "key_trends": ["AI adoption in gaming", "Personalized training"],
+            "competitive_landscape": ["Traditional coaching", "Analytics tools"],
+            "key_trends": ["AI adoption", "Esports growth"],
             "trophi_fit_score": fit_score,
-            "recommendation": "Validate market size with pilot program",
-            "risks": ["Market validation needed", "Competitive response"],
+            "recommendation": "Validate with pilot program",
+            "risks": ["Market validation", "Competition"],
             "budget_estimate": 25000 + ((hash_val % 100) * 1000),
             "roi_potential": 1.5 + (fit_score * 2),
             "game_title_fit": games[hash_val % 3],
             "priority": priorities[hash_val % 3],
-            "metrics_to_track": ["User acquisition", "Engagement rate", "Retention"]
+            "metrics_to_track": ["User acquisition", "Engagement"]
         }
+    
+    def _generate_fallback_briefing(self, opportunity: str) -> str:
+        """Generate narrative fallback briefing"""
+        return f"""
+# Executive Briefing: {opportunity[:50]}...
+
+## Market Overview
+Estimated market size of $50-250M with strong growth in competitive gaming. 
+Target demographic: competitive gamers aged 16-30 seeking performance improvement.
+
+## Competitive Landscape
+Fragmented market with traditional coaching platforms and emerging AI tools. 
+Room for differentiation through technology and user experience.
+
+## Trophi.ai Strategic Fit
+Moderate alignment with Trophi's AI coaching mission. High technical feasibility 
+with potential to leverage existing infrastructure.
+
+## Recommendation
+Start with pilot program to validate assumptions, then scale based on data.
+
+## Key Risks
+- Market validation needed
+- Competitive response possible  
+- Technical execution challenges
+"""
     
     def _generate_fallback_briefing(self, opportunity: str) -> str:
         """Generate a narrative fallback briefing"""
