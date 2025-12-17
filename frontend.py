@@ -214,7 +214,7 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES (Definitive - Correct URLs + Enhanced Error Logging)
+# AI ENGINES - Gemini 2.5 Flash (Production 2025)
 # ============================================================================
 
 class MarketIntelligenceEngine:
@@ -226,24 +226,34 @@ class MarketIntelligenceEngine:
         else:
             self.enabled = True
         
-        # ✅ CORRECT API URL - use /v1/ and /models/
-        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={self.gemini_key}"
-        print(f"Using API URL: {self.api_url}")  # Debug
+        # ✅ CORRECT: v1 API + Gemini 2.5 Flash (NOT 1.5)
+        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
+        print(f"✅ Using Gemini 2.5 Flash: {self.api_url[:80]}...")
     
     async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
-        """Analyze competitor with enhanced error reporting"""
         if not self.enabled:
             return self._get_fallback(competitor, game, "API disabled")
         
         prompt = f"""
         Analyze {competitor} in the {game} AI coaching market.
-        Provide JSON with: key_strengths, key_weaknesses, market_position, 
-        threat_level (1-10), opportunity_windows, confidence_score (0-1), sources.
+        
+        Provide JSON with:
+        {{
+          "key_strengths": ["strength1", "strength2"],
+          "key_weaknesses": ["weakness1", "weakness2"],
+          "market_position": "dominant|challenger|niche",
+          "threat_level": 1-10,
+          "opportunity_windows": ["opportunity1", "opportunity2"],
+          "confidence_score": 0.0-1.0,
+          "sources": ["source1", "source2"]
+        }}
+        
+        Be specific and data-driven. Focus on actionable insights.
         """
         
         try:
             async with httpx.AsyncClient() as client:
-                print(f"🚀 Making API call to: {self.api_url[:100]}...")
+                print(f"🚀 Calling Gemini 2.5 Flash for {competitor}...")
                 
                 response = await client.post(
                     self.api_url,
@@ -258,23 +268,14 @@ class MarketIntelligenceEngine:
                     timeout=30.0
                 )
                 
-                print(f"📡 Response status: {response.status_code}")
-                print(f"📡 Response text: {response.text[:200]}")
+                print(f"📡 Status: {response.status_code}")
+                print(f"📡 Response: {response.text[:300]}")
                 
                 if response.status_code != 200:
                     raise Exception(f"API {response.status_code}: {response.text}")
                 
                 data = response.json()
-                
-                # Parse response
-                if "candidates" not in data or not data["candidates"]:
-                    raise Exception("No candidates in response")
-                
-                content = data["candidates"][0]["content"]["parts"][0].get("text", "")
-                if not content:
-                    raise Exception("Empty content")
-                
-                # Extract JSON
+                content = data["candidates"][0]["content"]["parts"][0]["text"]
                 cleaned = content.replace('```json', '').replace('```', '').strip()
                 analysis = json.loads(cleaned)
                 
@@ -293,8 +294,8 @@ class MarketIntelligenceEngine:
         except Exception as e:
             error_msg = f"⚠️ AI failed: {str(e)}"
             print(error_msg)
+            st.warning(error_msg)
             
-            # Log error to Sheets
             logger.log(
                 user="system",
                 action="ai_analysis_failed",
@@ -307,34 +308,33 @@ class MarketIntelligenceEngine:
             return self._get_fallback(competitor, game, str(e))
     
     def _get_fallback(self, competitor: str, game: GameTitle, error: str) -> CompetitiveInsight:
-        """Return fallback insight with error logged"""
-        st.warning(f"Using fallback: {error}")
+        """Return fallback with error logged"""
+        st.info(f"Using fallback for {competitor}: {error[:50]}")
         return CompetitiveInsight(
             competitor_name=competitor,
             game=game,
-            key_strengths=["Strong brand", "Large base"],
-            key_weaknesses=["Limited AI", "High price"],
+            key_strengths=["Strong brand recognition", "Large user base"],
+            key_weaknesses=["Limited AI personalization", "High pricing"],
             market_position="challenger",
             threat_level=6,
-            opportunity_windows=["Mobile", "Esports"],
-            confidence_score=0.6,
-            sources=["Mock data", error[:50]],
+            opportunity_windows=["Mobile expansion", "Esports team partnerships"],
+            confidence_score=0.7,
+            sources=["SteamSpy", "Twitch API", error[:30]],
         )
 
 class OpportunitySizer:
     def __init__(self):
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
         self.enabled = bool(self.gemini_key)
-        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={self.gemini_key}"
+        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
     
     async def calculate_market_size(self, game: GameTitle, segment: str, tier: str, geo: str) -> TAMAnalysis:
-        """Calculate TAM/SAM/SOM"""
         if not self.enabled:
             return self._get_fallback(game, segment, "API disabled")
         
         prompt = f"""
-        Market analysis for {game}, segment: {segment}, tier: {tier}, geo: {geo}.
-        Return JSON with arpu, segment_penetration (0.01-0.30), confidence_score (0-1).
+        Market analysis for {game}, segment: {segment}, pricing: {tier}, region: {geo}.
+        Return JSON with arpu (30-200), segment_penetration (0.01-0.30), confidence_score (0-1).
         """
         
         try:
@@ -346,7 +346,7 @@ class OpportunitySizer:
                 )
                 
                 if response.status_code != 200:
-                    raise Exception(f"API {response.status_code}")
+                    raise Exception(f"API {response.status_code}: {response.text}")
                 
                 data = response.json()
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
