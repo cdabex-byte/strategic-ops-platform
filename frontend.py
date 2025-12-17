@@ -410,7 +410,7 @@ with tab1:
                     session_id=st.session_state.session_id
                 )
                 
-                # Store for human review
+                # Store for human review (using dict() which is JSON-safe now)
                 store_review("insight", competitor, insight.dict())
                 
                 # Display results
