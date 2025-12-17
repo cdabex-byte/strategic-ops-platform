@@ -72,7 +72,7 @@ def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer
             f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
             item_type,
             item_id,
-            json.dumps(content),
+            json.dumps(content, default=str),
             reviewer_notes,
             datetime.now().isoformat()
         ))
@@ -196,7 +196,7 @@ class MarketIntelligenceEngine:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={self.gemini_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
                     json={"contents": [{"parts": [{"text": prompt}]}]},
                     timeout=30.0
                 )
