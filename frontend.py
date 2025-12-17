@@ -88,7 +88,7 @@ class DatabaseManager:
     def __init__(self, db_path: str = Settings.DATABASE_URL):
         self.db_path = db_path
         self._init_db()
-        self._migrate_db()
+        self._migrate_db()  # Add this line
     
     def _init_db(self):
         """Initialize database tables"""
@@ -177,29 +177,11 @@ class DatabaseManager:
                 conn.commit()
                 print("✅ Migration complete")
         except Exception as e:
-            print(f"Migration skipped: {e}")
-        finally:
-            conn.close()
-    
-    def _migrate_db(self):
-        """Add missing columns to existing database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        try:
-            # Check if briefing_text column exists
-            cursor.execute("PRAGMA table_info(ai_analysis_cache)")
-            columns = [row[1] for row in cursor.fetchall()]
-            
-            if 'briefing_text' not in columns:
-                print("🔄 Migrating database: adding briefing_text column...")
-                cursor.execute("ALTER TABLE ai_analysis_cache ADD COLUMN briefing_text TEXT")
-                conn.commit()
-                print("✅ Migration complete")
-        except Exception as e:
             print(f"Migration error: {e}")
         finally:
             conn.close()
+    
+    # [KEEP ALL EXISTING METHODS BELOW THIS POINT - save_initiative, get_initiatives, etc.]
     
     def save_initiative(self, initiative: StrategicInitiative):
         """Save initiative to database"""
@@ -357,7 +339,7 @@ class GeminiAI:
             return cached["analysis"], cached["briefing"]
         
         # Enhanced prompt for varied results
-        prompt = f"""
+        prompt = f'''
         You are a senior Strategy & Operations Associate at Trophi.ai, an AI coaching platform for competitive gamers.
         
         **TASK:** Analyze this business opportunity and provide UNIQUE, specific market research.
