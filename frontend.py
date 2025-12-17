@@ -850,7 +850,7 @@ if page == "🔍 AI Opportunity Analysis":
     st.title("🔍 AI-Powered Opportunity Analysis")
     
     with st.expander("🐞 AI Debug Info", expanded=not ai_engine.configured):
-    st.json({
+        st.json({
         "Gemini Configured": ai_engine.configured,
         "API Key Present": bool(st.secrets.get("GEMINI_API_KEY")),
         "Model Loaded": ai_engine.model is not None,
