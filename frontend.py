@@ -634,7 +634,7 @@ if page == "📊 Executive Dashboard":
                         st.success("✅ Data fetched!")
                         st.metric("CS2 Active Players", f"{metrics.get('active_players', 0):,}")
                         st.metric("CS2 Twitch Viewers", f"{metrics.get('live_viewers', 0):,}")
-                        st.metric("Engagement Ratio", f"{metrics.get('engagement_ratio', 0.0:.2%}")
+                        st.metric("Engagement Ratio", f"{metrics.get('engagement_ratio', 0.0):.2%}")
                         
                         with st.expander("🤖 AI Recommendations"):
                             for rec in result.get("recommendations", []):
