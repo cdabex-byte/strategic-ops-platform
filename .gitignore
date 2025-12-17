@@ -1,27 +1,14 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-
-# Secrets
+# Secrets & env
 .streamlit/secrets.toml
 .env
 service_account.json
 
+# Python
+__pycache__/
+*.py[cod]
+venv/
+*.db
+
 # OS
 .DS_Store
 Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Database
-*.db
-*.sqlite
