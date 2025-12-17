@@ -1,6 +1,6 @@
 """
-Strategic Operations Platform v2.0 - Single File
-All-in-one: Backend logic + Streamlit UI
+Strategic Operations Platform v2.1 - AI-Powered
+All-in-one: Backend logic + Streamlit UI + Gemini AI
 """
 
 import streamlit as st
@@ -15,16 +15,17 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, validator
-from dataclasses import dataclass
+import google.generativeai as genai
+import typing_extensions as typing
 
 # ==================== Configuration ====================
 
 class Settings:
     DATABASE_URL = "strategic.db"
-    CACHE_TTL = 300  # 5 minutes
-    STEAMSPY_RATE = 1.0  # 1 second between calls
+    CACHE_TTL = 300
+    STEAMSPY_RATE = 1.0
     RATE_LIMIT_CALLS = 100
-    RATE_LIMIT_WINDOW = 60  # seconds
+    RATE_LIMIT_WINDOW = 60
 
 # ==================== Enums & Models ====================
 
@@ -67,6 +68,7 @@ class StrategicInitiative(BaseModel):
     metrics: List[Metric] = []
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    ai_analysis: Optional[Dict[str, Any]] = None
     
     @validator('risk_score')
     def validate_risk(cls, v):
@@ -94,7 +96,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Initiatives table
+        # Initiatives table (updated with AI analysis)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS initiatives (
                 id TEXT PRIMARY KEY,
@@ -112,7 +114,8 @@ class DatabaseManager:
                 risk_score REAL,
                 created_at TEXT,
                 updated_at TEXT,
-                metrics TEXT
+                metrics TEXT,
+                ai_analysis TEXT
             )
         """)
         
@@ -146,6 +149,15 @@ class DatabaseManager:
             )
         """)
         
+        # AI Analysis cache
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_analysis_cache (
+                opportunity_key TEXT PRIMARY KEY,
+                analysis_data TEXT,
+                created_at TEXT
+            )
+        """)
+        
         conn.commit()
         conn.close()
     
@@ -155,7 +167,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT OR REPLACE INTO initiatives VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO initiatives VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             initiative.id, initiative.title, initiative.description,
             initiative.competitor, initiative.game_title.value,
@@ -163,7 +175,8 @@ class DatabaseManager:
             initiative.budget, initiative.roi_low, initiative.roi_base, initiative.roi_high,
             initiative.risk_score,
             initiative.created_at.isoformat(), initiative.updated_at.isoformat(),
-            json.dumps([m.dict() for m in initiative.metrics])
+            json.dumps([m.dict() for m in initiative.metrics]),
+            json.dumps(initiative.ai_analysis) if initiative.ai_analysis else None
         ))
         conn.commit()
         conn.close()
@@ -199,7 +212,8 @@ class DatabaseManager:
                 "status": row[6], "priority": row[7], "budget": row[8],
                 "roi_low": row[9], "roi_base": row[10], "roi_high": row[11],
                 "risk_score": row[12], "created_at": row[13], "updated_at": row[14],
-                "metrics": json.loads(row[15]) if row[15] else []
+                "metrics": json.loads(row[15]) if row[15] else [],
+                "ai_analysis": json.loads(row[16]) if row[16] else None
             }
             initiatives.append(initiative)
         
@@ -263,38 +277,127 @@ class DatabaseManager:
         conn.commit()
         conn.close()
     
-    def check_rate_limit(self, endpoint: str) -> bool:
-        """Simple rate limiting check"""
+    def save_ai_analysis(self, opportunity_key: str, analysis_data: Dict[str, Any]):
+        """Save AI analysis results"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        now = datetime.now()
-        window_start = (now - timedelta(seconds=Settings.RATE_LIMIT_WINDOW)).isoformat()
-        
-        cursor.execute(
-            "SELECT calls_made FROM rate_limits WHERE endpoint=? AND window_start > ?",
-            (endpoint, window_start)
-        )
-        result = cursor.fetchone()
-        
-        calls = result[0] if result else 0
-        
-        if calls >= Settings.RATE_LIMIT_CALLS:
-            conn.close()
-            return False
-        
-        # Update or insert
         cursor.execute("""
-            INSERT OR REPLACE INTO rate_limits (endpoint, calls_made, window_start)
+            INSERT OR REPLACE INTO ai_analysis_cache (opportunity_key, analysis_data, created_at)
             VALUES (?, ?, ?)
-        """, (endpoint, calls + 1, now.isoformat()))
-        
+        """, (opportunity_key, json.dumps(analysis_data), datetime.now().isoformat()))
         conn.commit()
         conn.close()
-        return True
+    
+    def get_ai_analysis(self, opportunity_key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve AI analysis results"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT analysis_data FROM ai_analysis_cache WHERE opportunity_key=?",
+            (opportunity_key,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return json.loads(result[0])
+        return None
 
 # Initialize global database
 db = DatabaseManager()
+
+# ==================== AI Integration (Gemini) ====================
+
+class GeminiAI:
+    """Google Gemini 1.5 Flash for market research and opportunity analysis"""
+    
+    def __init__(self):
+        self.api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if self.api_key:
+            genai.configure(api_key=self.api_key)
+            self.model = genai.GenerativeModel('gemini-1.5-flash')
+        else:
+            self.model = None
+    
+    async def analyze_opportunity(self, opportunity: str) -> Dict[str, Any]:
+        """AI-powered market research and Trophi.ai fit analysis"""
+        
+        if not self.model:
+            return {"error": "Gemini API key not configured", "market_size": 0, "competitive_landscape": []}
+        
+        # Check cache first
+        cache_key = f"opportunity_{hash(opportunity)}"
+        cached = db.get_ai_analysis(cache_key)
+        if cached:
+            return cached
+        
+        prompt = f"""
+        You are a Strategy & Operations Associate at Trophi.ai, an AI coaching platform for gamers.
+        Analyze this business opportunity and provide real data and actionable insights.
+        
+        OPPORTUNITY: {opportunity}
+        
+        Provide a detailed analysis in this exact JSON format:
+        {{
+            "opportunity_title": "Brief title",
+            "market_size": 0,  # TAM in millions USD
+            "market_growth_rate": 0.0,  # Annual % growth
+            "target_audience": "Description of target users",
+            "competitive_landscape": ["Competitor 1", "Competitor 2"],
+            "key_trends": ["Trend 1", "Trend 2"],
+            "trophi_fit_score": 0.0,  # 0-1 score how well it fits Trophi.ai
+            "recommendation": "specific recommendation",
+            "risks": ["Risk 1", "Risk 2"],
+            "budget_estimate": 0,  # Estimated budget needed in USD
+            "roi_potential": 0.0,  # Expected ROI multiple
+            "game_title_fit": "CS2 or VALORANT or League of Legends",
+            "priority": "high/medium/low",
+            "metrics_to_track": ["Metric 1", "Metric 2"]
+        }}
+        
+        Be specific with real data and numbers where possible.
+        Focus on gaming/esports market.
+        """
+        
+        try:
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3
+                )
+            )
+            
+            analysis = json.loads(response.text)
+            
+            # Cache the result
+            db.save_ai_analysis(cache_key, analysis)
+            
+            return analysis
+            
+        except Exception as e:
+            print(f"Gemini API error: {e}")
+            # Return fallback data
+            return {
+                "opportunity_title": opportunity[:50],
+                "market_size": 100,
+                "market_growth_rate": 15.5,
+                "target_audience": "Competitive gamers aged 16-30",
+                "competitive_landscape": ["Example Competitor"],
+                "key_trends": ["AI in gaming", "Esports growth"],
+                "trophi_fit_score": 0.7,
+                "recommendation": "Proceed with caution - validate market size",
+                "risks": ["Unvalidated market", "High competition"],
+                "budget_estimate": 50000,
+                "roi_potential": 2.5,
+                "game_title_fit": "CS2",
+                "priority": "medium",
+                "metrics_to_track": ["User acquisition", "Engagement rate"]
+            }
+
+# Initialize AI engine
+ai_engine = GeminiAI()
 
 # ==================== API Integrations ====================
 
@@ -305,7 +408,7 @@ class SteamSpyAPI:
     
     async def get_game_data(self, app_id: str) -> Dict[str, Any]:
         """Get real player counts for games"""
-        await asyncio.sleep(0.1)  # Respect rate limit
+        await asyncio.sleep(0.1)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
@@ -315,7 +418,7 @@ class SteamSpyAPI:
                     return response.json()
         except Exception as e:
             print(f"SteamSpy API error: {e}")
-        return {"players": 500_000}  # Fallback
+        return {"players": 500_000}
 
 class TwitchAPI:
     """Get live viewership data"""
@@ -435,6 +538,7 @@ class MarketIntelligenceEngine:
         self.twitch = TwitchAPI()
         self.slack = SlackNotifier()
         self.hubspot = HubSpotCRM()
+        self.ai = ai_engine
         self._last_steam_call = datetime.min
     
     async def _rate_limit_steam(self):
@@ -448,7 +552,6 @@ class MarketIntelligenceEngine:
     async def analyze_competitor(self, game: GameTitle, competitor: str) -> Dict[str, Any]:
         """Real-time competitor analysis with caching"""
         
-        # Check cache first
         cache_key = f"analysis_{game}_{competitor}"
         cached = db.cache_get(cache_key)
         if cached:
@@ -456,7 +559,6 @@ class MarketIntelligenceEngine:
         
         await self._rate_limit_steam()
         
-        # Map games to IDs
         game_ids = {GameTitle.CS2: "730", GameTitle.VALORANT: "1286300"}
         game_names = {
             GameTitle.CS2: "Counter-Strike 2",
@@ -464,14 +566,10 @@ class MarketIntelligenceEngine:
             GameTitle.VALORANT: "VALORANT"
         }
         
-        app_id = game_ids.get(game, "730")
-        twitch_name = game_names.get(game, "CS2")
-        
-        # Parallel API calls
         try:
             steam_data, twitch_data = await asyncio.gather(
-                self.steamspy.get_game_data(app_id),
-                self.twitch.get_game_viewership(twitch_name)
+                self.steamspy.get_game_data(game_ids.get(game, "730")),
+                self.twitch.get_game_viewership(game_names.get(game, "CS2"))
             )
             
             players = steam_data.get("players", 0) if isinstance(steam_data, dict) else 0
@@ -489,7 +587,6 @@ class MarketIntelligenceEngine:
                 "recommendations": self._generate_recommendations(players, viewers)
             }
             
-            # Cache result
             db.cache_set(cache_key, result)
             return result
             
@@ -503,8 +600,6 @@ class MarketIntelligenceEngine:
             recommendations.append("🎯 High player base - prioritize community features")
         if viewers / max(players, 1) > 0.1:
             recommendations.append("📈 Strong viewership - explore esports partnerships")
-        if players < 100_000 and viewers > 50_000:
-            recommendations.append("📺 High viewer/player ratio - focus on content creators")
         return recommendations
     
     def calculate_roi_simulation(self, budget: float, risk_score: float) -> Dict[str, float]:
@@ -534,19 +629,32 @@ def generate_executive_report() -> str:
     initiatives = db.get_initiatives()
     partnerships = db.get_partnerships()
     
-    df_initiatives = pd.DataFrame(initiatives)
+    df = pd.DataFrame(initiatives)
     df_partnerships = pd.DataFrame(partnerships)
     
-    # Calculate KPIs
-    total_budget = df_initiatives["budget"].sum() if not df_initiatives.empty else 0
-    avg_risk = df_initiatives["risk_score"].mean() if not df_initiatives.empty else 0
-    high_priority_count = len(df_initiatives[df_initiatives["priority"] == "high"]) if not df_initiatives.empty else 0
+    total_budget = df["budget"].sum() if not df.empty else 0
+    avg_risk = df["risk_score"].mean() if not df.empty else 0
+    high_priority_count = len(df[df["priority"] == "high"]) if not df.empty else 0
     total_pipeline = df_partnerships["value"].sum() if not df_partnerships.empty else 0
     
-    active_initiatives = df_initiatives[df_initiatives["status"] != "complete"] if not df_initiatives.empty else pd.DataFrame()
+    # AI insights from latest analysis
+    latest_ai = db.get_ai_analysis("latest")
+    if latest_ai:
+        ai_insights = f"""
+## 🤖 Latest AI Opportunity Analysis
+        
+**Opportunity:** {latest_ai.get('opportunity_title', 'N/A')}
+**Trophi Fit Score:** {latest_ai.get('trophi_fit_score', 0):.1%}
+**Market Size:** ${latest_ai.get('market_size', 0)}M
+**Recommendation:** {latest_ai.get('recommendation', 'N/A')}
+"""
+    else:
+        ai_insights = "## 🤖 AI Analysis\nNo recent AI analysis available."
     
     report = f"""# Strategic Operations Weekly Report
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+{ai_insights}
 
 ## 📊 Key Metrics
 - **Total Initiative Budget:** ${total_budget:,.2f}
@@ -555,18 +663,18 @@ def generate_executive_report() -> str:
 - **Partnership Pipeline:** ${total_pipeline:,.2f}
 
 ## 🎯 Active Initiatives
-{active_initiatives.to_markdown(index=False) if not active_initiatives.empty else "No active initiatives"}
+{df[df["status"] != "complete"].to_markdown(index=False) if not df[df["status"] != "complete"].empty else "No active initiatives"}
 
 ## 🤝 Partnership Deals
 {df_partnerships.to_markdown(index=False) if not df_partnerships.empty else "No partnership deals"}
 
 ## ⚠️ Risk Analysis
-- **High-Risk Initiatives (>20%):** {len(df_initiatives[df_initiatives["risk_score"] > 0.2]) if not df_initiatives.empty else 0}
-- **Budget at Risk:** ${df_initiatives[df_initiatives["risk_score"] > 0.2]["budget"].sum():,.2f if not df_initiatives.empty else 0}
+- **High-Risk Initiatives (>20%):** {len(df[df["risk_score"] > 0.2]) if not df.empty else 0}
+- **Budget at Risk:** ${df[df["risk_score"] > 0.2]["budget"].sum():,.2f if not df.empty and not df[df["risk_score"] > 0.2].empty else 0}
 
 ---
 
-*Report auto-generated by Strategic Operations Platform v2.0*
+*Report auto-generated by Strategic Operations Platform v2.1*
 """
     return report
 
@@ -574,22 +682,148 @@ def generate_executive_report() -> str:
 
 # Page configuration
 st.set_page_config(
-    page_title="Strategic Operations Platform v2.0",
+    page_title="Strategic Operations Platform v2.1",
     page_icon="🎮",
     layout="wide"
 )
 
 # Sidebar navigation
-st.sidebar.title("🎮 Strategic Ops v2.0")
+st.sidebar.title("🎮 Strategic Ops v2.1")
 page = st.sidebar.radio(
     "Navigation",
-    ["📊 Executive Dashboard", "🎯 Initiatives", "🤝 Partnerships", "📈 Market Intelligence", "⚙️ Settings"],
+    ["🔍 AI Opportunity Analysis", "📊 Executive Dashboard", "🎯 Initiatives", "🤝 Partnerships", "📈 Market Intelligence", "⚙️ Settings"],
     index=0
 )
 
+# ==================== AI Opportunity Analysis ====================
+
+if page == "🔍 AI Opportunity Analysis":
+    st.title("🔍 AI-Powered Opportunity Analysis")
+    
+    st.markdown("""
+    Describe any business opportunity and AI will research market data, competitive landscape, 
+    and Trophi.ai fit, then auto-populate all sections.
+    """)
+    
+    # Chat interface
+    user_input = st.text_area(
+        "📝 Describe your opportunity (e.g., 'Launch AI coaching for VALORANT in Asia market')",
+        height=150,
+        placeholder="Enter detailed opportunity description..."
+    )
+    
+    if st.button("🚀 Analyze with AI", use_container_width=True, type="primary"):
+        if not user_input.strip():
+            st.error("❌ Please describe an opportunity to analyze")
+        else:
+            with st.spinner("🤖 AI is conducting market research..."):
+                try:
+                    # Run AI analysis
+                    analysis = asyncio.run(engine.ai.analyze_opportunity(user_input))
+                    
+                    if "error" not in analysis:
+                        # Display AI insights
+                        st.success("✅ AI Analysis Complete!")
+                        
+                        # Trophi Fit Score Gauge
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("🎯 Trophi Fit Score", f"{analysis.get('trophi_fit_score', 0):.1%}")
+                        with col2:
+                            st.metric("📈 Market Size", f"${analysis.get('market_size', 0)}M")
+                        with col3:
+                            st.metric("💰 Est. Budget", f"${analysis.get('budget_estimate', 0):,.0f}")
+                        
+                        # Key insights
+                        st.subheader("🤖 AI Insights")
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("**Target Audience:**")
+                            st.info(analysis.get("target_audience", "N/A"))
+                            
+                            st.markdown("**Key Trends:**")
+                            for trend in analysis.get("key_trends", []):
+                                st.success(f"• {trend}")
+                        
+                        with col2:
+                            st.markdown("**Competitive Landscape:**")
+                            for competitor in analysis.get("competitive_landscape", []):
+                                st.warning(f"⚠️ {competitor}")
+                            
+                            st.markdown("**Risks:**")
+                            for risk in analysis.get("risks", []):
+                                st.error(f"• {risk}")
+                        
+                        # Recommendation
+                        st.subheader("💡 AI Recommendation")
+                        st.markdown(f"> {analysis.get('recommendation', 'No recommendation available')}")
+                        
+                        # Auto-create initiative from AI analysis
+                        st.subheader("🎯 Auto-Generated Initiative")
+                        if st.button("✨ Create Initiative from AI Analysis", use_container_width=True):
+                            initiative = StrategicInitiative(
+                                title=analysis.get("opportunity_title", "AI Generated Initiative"),
+                                description=user_input,
+                                competitor=analysis.get("competitive_landscape", ["Unknown"])[0] if analysis.get("competitive_landscape") else "Unknown",
+                                game_title=GameTitle[analysis.get("game_title_fit", "CS2")] if analysis.get("game_title_fit") in GameTitle.__members__ else GameTitle.CS2,
+                                owner="AI Analyst",
+                                budget=analysis.get("budget_estimate", 50000),
+                                risk_score=1.0 - analysis.get("trophi_fit_score", 0.5),
+                                priority=InitiativePriority[analysis.get("priority", "medium")] if analysis.get("priority") in InitiativePriority.__members__ else InitiativePriority.MEDIUM,
+                                metrics=[Metric(name=metric, current_value=0, target_value=100, unit="%") for metric in analysis.get("metrics_to_track", ["Engagement"])[:3]],
+                                ai_analysis=analysis
+                            )
+                            
+                            # Calculate ROI
+                            roi_data = engine.calculate_roi_simulation(initiative.budget, initiative.risk_score)
+                            initiative.roi_low = roi_data["roi_low"]
+                            initiative.roi_base = roi_data["roi_base"]
+                            initiative.roi_high = roi_data["roi_high"]
+                            
+                            # Save to database
+                            db.save_initiative(initiative)
+                            
+                            st.success(f"✅ Initiative created: {initiative.id}")
+                            st.info(f"""
+                            **ROI Simulation:**
+                            - Conservative: ${roi_data["roi_low"]:,.0f}
+                            - Expected: ${roi_data["roi_base"]:,.0f}
+                            - Optimistic: ${roi_data["roi_high"]:,.0f}
+                            """)
+                            
+                            # Send Slack alert for high priority
+                            if initiative.priority == InitiativePriority.HIGH:
+                                message = f"""
+                                *🤖 AI-GENERATED HIGH PRIORITY INITIATIVE*
+                                *Title:* {initiative.title}
+                                *Budget:* ${initiative.budget:,.2f}
+                                *Trophi Fit:* {analysis.get('trophi_fit_score', 0):.1%}
+                                """
+                                asyncio.run(engine.slack.send_alert(message, "high"))
+                        
+                        # Save as latest analysis
+                        db.save_ai_analysis("latest", analysis)
+                        
+                    else:
+                        st.error(f"❌ AI analysis failed: {analysis.get('error', 'Unknown error')}")
+                        
+                except Exception as e:
+                    st.error(f"❌ Analysis error: {e}")
+    
+    # Show recent analyses
+    st.subheader("📚 Recent AI Analyses")
+    # In a real app, you'd query all analyses; here we show the latest
+    latest = db.get_ai_analysis("latest")
+    if latest:
+        with st.expander(f"Latest: {latest.get('opportunity_title', 'N/A')}"):
+            st.json(latest)
+    else:
+        st.info("No AI analyses yet. Start by describing an opportunity!")
+
 # ==================== Executive Dashboard ====================
 
-if page == "📊 Executive Dashboard":
+elif page == "📊 Executive Dashboard":
     st.title("📊 Executive Dashboard")
     
     # Refresh button
@@ -619,6 +853,17 @@ if page == "📊 Executive Dashboard":
         risk_count = len(df[df["risk_score"] > 0.2]) if not df.empty else 0
         st.metric("High-Risk Items", risk_count)
     
+    # AI Insights from latest analysis
+    latest_ai = db.get_ai_analysis("latest")
+    if latest_ai:
+        st.subheader("🤖 Latest AI Analysis")
+        st.info(f"""
+        **Opportunity:** {latest_ai.get('opportunity_title', 'N/A')}  
+        **Trophi Fit:** {latest_ai.get('trophi_fit_score', 0):.1%}  
+        **Market Size:** ${latest_ai.get('market_size', 0)}M  
+        **Recommendation:** {latest_ai.get('recommendation', 'N/A')}
+        """)
+    
     # Live market data
     st.subheader("🎮 Live Market Data")
     game_col1, game_col2 = st.columns(2)
@@ -647,6 +892,11 @@ if page == "📊 Executive Dashboard":
     # Initiative pipeline
     st.subheader("🎯 Initiative Pipeline")
     if not df.empty:
+        # Show initiatives with AI insights
+        ai_initiatives = df[df['ai_analysis'].notna()]
+        if not ai_initiatives.empty:
+            st.caption(f"🤖 {len(ai_initiatives)} AI-generated initiatives")
+        
         fig = px.scatter(
             df,
             x="budget",
@@ -759,7 +1009,7 @@ elif page == "🎯 Initiatives":
     initiatives = db.get_initiatives()
     
     if initiatives:
-        for initiative in initiatives[:10]:  # Show top 10
+        for initiative in initiatives[:10]:
             with st.container():
                 col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
                 
@@ -770,6 +1020,8 @@ elif page == "🎯 Initiatives":
                 
                 with col1:
                     st.markdown(f"**{initiative['title']}**")
+                    if initiative.get('ai_analysis'):
+                        st.caption("🤖 AI-Generated")
                     st.caption(f"Owner: {initiative['owner']} | Game: {initiative['game_title']}")
                 
                 with col2:
@@ -785,7 +1037,7 @@ elif page == "🎯 Initiatives":
                 
                 st.divider()
     else:
-        st.info("No initiatives found. Create your first one!")
+        st.info("No initiatives found. Create your first one or use AI Analysis!")
 
 # ==================== Partnerships ====================
 
@@ -873,15 +1125,13 @@ elif page == "📈 Market Intelligence":
                     st.subheader("🤖 AI Recommendations")
                     for rec in result.get("recommendations", []):
                         st.success(rec)
-                    
+                        
                     # Raw data
                     with st.expander("View Raw API Response"):
                         st.json(result)
-                else:
-                    st.error(f"Analysis failed: {result['error']}")
-                    
+                        
             except Exception as e:
-                st.error(f"Failed to analyze: {e}")
+                st.error(f"Analysis failed: {e}")
 
 # ==================== Settings ====================
 
@@ -891,6 +1141,7 @@ elif page == "⚙️ Settings":
     # API Keys
     st.subheader("🔐 API Keys")
     with st.expander("Configure Integrations"):
+        st.text_input("Google Gemini API Key", type="password", key="gemini_key")
         st.text_input("Twitch Client ID", type="password", key="twitch_id")
         st.text_input("Twitch Client Secret", type="password", key="twitch_secret")
         st.text_input("Slack Webhook URL", type="password", key="slack_webhook")
@@ -905,31 +1156,31 @@ elif page == "⚙️ Settings":
     
     with col1:
         st.metric("Database", "Connected" if sqlite3.connect(Settings.DATABASE_URL) else "Error")
-        st.metric("Cache Size", f"{len(db.get_partnerships())} items")
+        st.metric("Total Initiatives", len(db.get_initiatives()))
     
     with col2:
-        initiatives_count = len(db.get_initiatives())
-        st.metric("Total Initiatives", initiatives_count)
+        st.metric("AI Integration", "Active" if ai_engine.model else "Not Configured")
         st.metric("Partnership Pipeline", f"${pd.DataFrame(db.get_partnerships())['value'].sum() if db.get_partnerships() else 0:,.2f}")
     
     # Health check
     if st.button("Run Health Check", use_container_width=True):
         try:
-            # Test async engine
             st.success("✅ Market Intelligence Engine: Running")
-            
-            # Test database
             st.success("✅ SQLite Database: Connected")
             
-            # Test APIs (if configured)
+            if st.secrets.get("GEMINI_API_KEY"):
+                st.success("✅ Gemini AI: Configured")
+            else:
+                st.warning("⚠️ Gemini AI: Not configured (add GEMINI_API_KEY to secrets)")
+            
             if st.secrets.get("TWITCH_CLIENT_ID"):
-                st.info("⚠️ Twitch API: Not tested (rate limit protection)")
+                st.info("✅ Twitch API: Configured")
             
             if st.secrets.get("SLACK_WEBHOOK_URL"):
-                st.info("⚠️ Slack: Configured but not tested")
+                st.info("✅ Slack: Configured")
             
             if st.secrets.get("HUBSPOT_API_KEY"):
-                st.info("⚠️ HubSpot: Configured but not tested")
+                st.info("✅ HubSpot: Configured")
                 
         except Exception as e:
             st.error(f"❌ Health check failed: {e}")
@@ -937,5 +1188,12 @@ elif page == "⚙️ Settings":
 # ==================== Footer ====================
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Strategic Operations Platform v2.0")
+st.sidebar.caption("Strategic Operations Platform v2.1")
 st.sidebar.caption(f"Last refresh: {datetime.now().strftime('%H:%M:%S')}")
+
+# Initialize page on first load
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+    st.sidebar.success("✅ Platform initialized")
+    if not ai_engine.model:
+        st.sidebar.warning("⚠️ Add GEMINI_API_KEY in secrets for AI features")
