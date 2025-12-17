@@ -92,11 +92,18 @@ def get_db():
     conn.commit()
     return conn
 
+# Replace your store_review function with this:
+
 def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
     """Store AI-generated content for human review"""
     conn = get_db()
     try:
         cursor = conn.cursor()
+        
+        # Convert datetime fields to ISO strings
+        if isinstance(content, dict) and 'generated_at' in content:
+            content['generated_at'] = str(content['generated_at'])
+        
         cursor.execute("""
             INSERT INTO reviews (id, item_type, item_id, generated_content, reviewer_notes, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -104,13 +111,23 @@ def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer
             f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
             item_type,
             item_id,
-            json.dumps(content, default=str),
+            json.dumps(content),
             reviewer_notes,
             datetime.now().isoformat()
         ))
         conn.commit()
+    except Exception as e:
+        logger.log(
+            user="system",
+            action="store_review_error",
+            input_data={"item_type": item_type, "item_id": item_id},
+            status="error",
+            error=str(e),
+            session_id=st.session_state.session_id
+        )
+        st.error(f"❌ Failed to store review: {e}")
     finally:
-        conn.close()
+        conn.close())
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def get_pending_reviews() -> List[Dict[str, Any]]:
