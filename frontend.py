@@ -1,6 +1,7 @@
 """
 Strategic Operations Platform - Single File Deployment
 Everything runs in Streamlit Cloud: UI, AI, Logging, Database
+100% module-level safe
 """
 
 import streamlit as st
@@ -32,6 +33,100 @@ if 'user' not in st.session_state:
 from sheets_logger import get_logger
 
 logger = get_logger()  # Will connect to Sheets if secrets available
+
+# ============================================================================
+# DATABASE HELPERS (Fixed - No Module-Level Calls)
+# ============================================================================
+
+def get_db():
+    """Get a NEW SQLite connection (do NOT cache)"""
+    import os
+    os.makedirs("/tmp", exist_ok=True)
+    conn = sqlite3.connect("/tmp/strategic_ops.db", check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id TEXT PRIMARY KEY,
+            item_type TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            generated_content TEXT NOT NULL,
+            reviewer_notes TEXT,
+            status TEXT DEFAULT 'pending',
+            reviewed_by TEXT,
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
+    """Store AI-generated content for human review"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reviews (id, item_type, item_id, generated_content, reviewer_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
+            item_type,
+            item_id,
+            json.dumps(content),
+            reviewer_notes,
+            datetime.now().isoformat()
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=30)  # Cache for 30 seconds
+def get_pending_reviews() -> List[Dict[str, Any]]:
+    """Get all pending reviews - cached to avoid module-level calls"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM reviews WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                "id": row[0],
+                "item_type": row[1],
+                "item_id": row[2],
+                "generated_content": json.loads(row[3]),
+                "reviewer_notes": row[4],
+                "status": row[5],
+                "reviewed_by": row[6],
+                "reviewed_at": row[7],
+                "created_at": row[8]
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        return []
+
+def update_review(review_id: str, status: str, reviewer: str, notes: str = None):
+    """Update review status"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE reviews 
+            SET status = ?, reviewed_by = ?, reviewer_notes = ?, reviewed_at = ?
+            WHERE id = ?
+        """, (
+            status,
+            reviewer,
+            notes,
+            datetime.now().isoformat(),
+            review_id
+        ))
+        conn.commit()
+    finally:
+        conn.close()
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -70,7 +165,7 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES (Fixed - Better Error Handling)
+# AI ENGINES
 # ============================================================================
 
 class MarketIntelligenceEngine:
@@ -289,7 +384,7 @@ with tab1:
         
         analyze_btn = st.form_submit_button("🔍 Run Analysis", use_container_width=True)
     
-    if analyze_btn:
+    if Analyze_btn:
         # Log input
         logger.log(
             user=st.session_state.user,
@@ -434,7 +529,7 @@ with tab2:
                 st.exception(e)
 
 # ============================================================================
-# TAB 3: Human Review Queue  [FIXED INDENTATION]
+# TAB 3: Human Review Queue
 # ============================================================================
 
 with tab3:
@@ -444,7 +539,7 @@ with tab3:
     if st.button("🔄 Refresh Queue", use_container_width=True):
         st.experimental_rerun()
     
-    # Show pending reviews
+    # Show pending reviews (using cached function)
     pending_reviews = get_pending_reviews()
     
     if not pending_reviews:
@@ -471,7 +566,6 @@ with tab3:
                         key=f"notes_{review['id']}"
                     )
                 with col2:
-                    # FIXED: Proper indentation for reviewer field
                     reviewer = st.text_input("Reviewer", st.session_state.user, key=f"reviewer_{review['id']}")
                 
                 col1, col2, col3 = st.columns(3)
@@ -514,25 +608,28 @@ with tab3:
                     st.info("📝 Modification requested & logged")
 
 # ============================================================================
-# FOOTER & METRICS
+# FOOTER & METRICS (Fixed - Wrapped in cached function)
 # ============================================================================
+
+@st.cache_data(ttl=60)  # Cache for 60 seconds
+def get_review_metrics():
+    """Safely get review metrics from database"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'pending'")
+        pending = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'approved'")
+        approved = cursor.fetchone()[0]
+        conn.close()
+        return pending, approved
+    except Exception as e:
+        print(f"Metrics error: {e}")
+        return 0, 0
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Platform Metrics")
-
-# Get review counts (safe with proper connection handling)
-try:
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'pending'")
-    pending_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'approved'")
-    approved_count = cursor.fetchone()[0]
-    conn.close()
-except Exception as e:
-    pending_count = 0
-    approved_count = 0
-
+pending_count, approved_count = get_review_metrics()
 st.sidebar.metric("Pending Reviews", pending_count)
 st.sidebar.metric("Approved Reviews", approved_count)
 
