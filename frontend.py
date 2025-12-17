@@ -348,7 +348,7 @@ class OpportunitySizer:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={self.gemini_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
                     json={"contents": [{"parts": [{"text": prompt}]}]},
                     timeout=30.0
                 )
