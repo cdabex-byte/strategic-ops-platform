@@ -384,7 +384,7 @@ with tab1:
         
         analyze_btn = st.form_submit_button("🔍 Run Analysis", use_container_width=True)
     
-    if Analyze_btn:
+    if analyze_btn:
         # Log input
         logger.log(
             user=st.session_state.user,
