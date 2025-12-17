@@ -308,151 +308,258 @@ class DatabaseManager:
 
 # ==================== AI Integration (Gemini) ====================
 
+# ==================== AI Integration (Gemini) ====================
+
 class GeminiAI:
     """Google Gemini 1.5 Flash for market research and opportunity analysis"""
     
     def __init__(self):
         self.api_key = st.secrets.get("GEMINI_API_KEY", "")
         self.configured = bool(self.api_key)
+        self.last_error = None
+        
         if self.configured:
             try:
                 genai.configure(api_key=self.api_key)
                 self.model = genai.GenerativeModel('gemini-1.5-flash')
+                print("✅ Gemini API key found and model initialized")
+                
+                # Test connection with detailed error reporting
+                self._test_connection()
+                
             except Exception as e:
-                print(f"Gemini config error: {e}")
+                st.error(f"❌ Gemini API Configuration Error: {str(e)}")
+                print(f"❌ Gemini config error: {e}")
                 self.configured = False
                 self.model = None
+                self.last_error = str(e)
         else:
+            print("⚠️ No GEMINI_API_KEY found in secrets.toml")
+            st.warning("⚠️ Gemini API key not found in Streamlit secrets")
             self.model = None
     
+    def _test_connection(self):
+        """Test API connectivity with detailed logging"""
+        try:
+            test_model = genai.GenerativeModel('gemini-1.5-flash')
+            response = test_model.generate_content(
+                "Respond with 'API WORKING' only",
+                generation_config=genai.GenerationConfig(max_output_tokens=10)
+            )
+            
+            if response and hasattr(response, 'text') and "API WORKING" in response.text:
+                print("✅ Gemini API connection test PASSED")
+                st.sidebar.success("✅ Gemini AI Connected & Working")
+            else:
+                print("❌ Gemini API test failed - invalid response format")
+                st.sidebar.error("❌ Gemini API key may be invalid")
+                self.configured = False
+                self.model = None
+                
+        except Exception as e:
+            print(f"❌ Gemini API connection test FAILED: {e}")
+            st.sidebar.error(f"❌ API Test Failed: {str(e)}")
+            self.configured = False
+            self.model = None
+            self.last_error = str(e)
+    
     async def analyze_opportunity(self, opportunity: str) -> tuple[Dict[str, Any], str]:
-        """AI-powered market research and Trophi.ai fit analysis"""
+        """AI-powered market research with detailed error handling"""
         
         if not self.configured:
-            fallback_briefing = self._generate_fallback_briefing(opportunity)
-            return self._get_fallback_data(opportunity), fallback_briefing
+            st.warning("⚠️ Using fallback data - Gemini API not properly configured")
+            if self.last_error:
+                st.error(f"Last error: {self.last_error}")
+            return self._get_fallback_data(opportunity), self._generate_fallback_briefing(opportunity)
         
-        cache_key = f"opp_{hash(opportunity)}"
+        # More unique cache key to avoid collisions
+        cache_key = f"ai_analysis_v2_{hash(opportunity + st.session_state.get('user_id', 'default'))}"
         cached = db.get_ai_analysis(cache_key)
         if cached:
+            st.info("ℹ️ Using cached AI analysis")
             return cached["analysis"], cached["briefing"]
         
-        prompt = (
-            "You are a senior Strategy and Operations Associate at Trophi.ai.\n"
-            f"Analyze: {opportunity}\n\n"
-            "Provide market size (millions USD), growth rate (%), target audience, "
-            "2-3 competitors, Trophi fit score (0-1), priority, budget, ROI multiple, "
-            "game fit (CS2/VALORANT/League of Legends), and metrics.\n\n"
-            "Format:\n"
-            "BRIEFING_START\n"
-            "# Executive Briefing\n\n"
-            "[Narrative analysis]\n\n"
-            "BRIEFING_END\n\n"
-            "JSON_START\n"
-            "{\n"
-            '  "opportunity_title": "Title",\n'
-            '  "market_size": 0,\n'
-            '  "market_growth_rate": 0.0,\n'
-            '  "target_audience": "Description",\n'
-            '  "competitive_landscape": ["Comp1", "Comp2"],\n'
-            '  "key_trends": ["Trend1", "Trend2"],\n'
-            '  "trophi_fit_score": 0.0,\n'
-            '  "recommendation": "Specific rec",\n'
-            '  "risks": ["Risk1", "Risk2"],\n'
-            '  "budget_estimate": 0,\n'
-            '  "roi_potential": 0.0,\n'
-            '  "game_title_fit": "CS2",\n'
-            '  "priority": "medium",\n'
-            '  "metrics_to_track": ["Metric1", "Metric2"]\n'
-            "}\n"
-            "JSON_END"
-        )
+        # ENHANCED PROMPT - Forces varied, specific responses
+        prompt = f"""
+# TASK: Unique Market Analysis for Trophi.ai
+# INSTRUCTION: Generate completely different analysis based on the opportunity details
+# OPPORTUNITY: {opportunity}
+
+## CRITICAL: Analyze the SPECIFIC details below, DO NOT use generic templates
+
+- TARGET REGION: {st.session_state.get('target_region', 'Global')}
+- TARGET SEGMENT: {st.session_state.get('target_segment', 'Pro Players')}
+- TIMELINE: {st.session_state.get('timeline', '3-6 months')}
+
+## REQUIRED OUTPUT FORMAT:
+{{
+  "opportunity_title": "Specific title based on {opportunity[:30]}...",
+  "market_size_millions": <unique number 50-500 based on region/segment>,
+  "market_growth_percent": <unique number 5-35 based on timeline>,
+  "target_audience": "Specific description for {target_segment} in {target_region}",
+  "top_competitors": ["Specific competitor 1", "Specific competitor 2"],
+  "trophi_fit_score_0_to_1": <unique float based on opportunity keywords>,
+  "priority_level": "high/medium/low based on urgency",
+  "estimated_budget_usd": <unique number based on scope>,
+  "expected_roi_multiple": <unique float 1.0-5.0>,
+  "best_game_title_fit": "CS2/VALORANT/League of Legends based on context",
+  "key_metrics": ["specific metric 1", "specific metric 2"],
+  "key_risks": ["specific risk 1", "specific risk 2"],
+  "strategic_recommendation": "Specific, actionable recommendation"
+}}
+
+## BRIEFING TEXT (2-3 paragraphs):
+Provide detailed, specific analysis mentioning {opportunity} aspects
+DO NOT use generic "competitive gaming market" language
+"""
         
         try:
-            response = await asyncio.to_thread(
-                self.model.generate_content,
-                prompt,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.7,
-                    max_output_tokens=2000
+            with st.spinner("🤖 Generating unique AI analysis... this may take 10-20 seconds"):
+                response = await asyncio.to_thread(
+                    self.model.generate_content,
+                    prompt,
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.9,  # Higher temperature for maximum variation
+                        top_p=0.95,
+                        max_output_tokens=2500
+                    )
                 )
-            )
             
             result_text = response.text
             
-            briefing_start = result_text.find("BRIEFING_START")
-            briefing_end = result_text.find("BRIEFING_END")
-            if briefing_start != -1 and briefing_end != -1:
-                briefing = result_text[briefing_start + len("BRIEFING_START"):briefing_end].strip()
-            else:
-                briefing = self._generate_fallback_briefing(opportunity)
+            # Debug output (visible in browser console)
+            print(f"🤖 AI Raw Response:\n{result_text[:500]}...")
             
-            json_start = result_text.find("JSON_START")
-            json_end = result_text.find("JSON_END")
-            if json_start != -1 and json_end != -1:
-                json_str = result_text[json_start + len("JSON_START"):json_end].strip()
-                analysis = json.loads(json_str)
-            else:
-                analysis = self._get_fallback_data(opportunity)
-            
-            db.save_ai_analysis(cache_key, analysis, briefing)
-            return analysis, briefing
+            # Parse JSON
+            try:
+                # Find JSON block
+                json_start = result_text.find("{")
+                json_end = result_text.rfind("}")
+                if json_start != -1 and json_end != -1:
+                    json_str = result_text[json_start:json_end + 1]
+                    analysis_data = json.loads(json_str)
+                    
+                    # Extract briefing text (separate from JSON)
+                    briefing_start = result_text.find("BRIEFING TEXT")
+                    if briefing_start != -1:
+                        briefing = result_text[briefing_start:json_start].strip()
+                    else:
+                        # Use recommendation as briefing if no separate text
+                        briefing = f"# AI Analysis Briefing\n\n{analysis_data.get('strategic_recommendation', 'No briefing generated')}"
+                    
+                    # Cache and return
+                    db.save_ai_analysis(cache_key, analysis_data, briefing)
+                    st.success("✅ AI analysis generated successfully!")
+                    return analysis_data, briefing
+                else:
+                    raise ValueError("No valid JSON found in AI response")
+                    
+            except json.JSONDecodeError as je:
+                st.error(f"❌ AI response format error: Could not parse JSON")
+                print(f"JSON Parse Error: {je}")
+                print(f"Problematic text: {result_text[:200]}...")
+                return self._get_fallback_data(opportunity), self._generate_fallback_briefing(opportunity)
             
         except Exception as e:
-            print(f"Gemini API error: {e}")
-            fallback_briefing = self._generate_fallback_briefing(opportunity)
-            return self._get_fallback_data(opportunity), fallback_briefing
+            print(f"❌ AI Generation Error: {e}")
+            st.error(f"AI generation failed: {str(e)}")
+            return self._get_fallback_data(opportunity), self._generate_fallback_briefing(opportunity)
     
     def _get_fallback_data(self, opportunity: str) -> Dict[str, Any]:
+        """Enhanced fallback with keyword-based variation"""
         hash_val = int(hashlib.md5(opportunity.encode()).hexdigest(), 16)
-        market_size = 50 + (hash_val % 200)
-        fit_score = ((hash_val % 100) / 100) * 0.6 + 0.2
         
-        games = ["CS2", "VALORANT", "LEAGUE_OF_LEGENDS"]
-        priorities = ["high", "medium", "low"]
+        # Keyword-based customization
+        lower_opp = opportunity.lower()
+        
+        # Market size variation
+        base_market = 50
+        if "asia" in lower_opp or "china" in lower_opp:
+            base_market += 100
+        if "pro" in lower_opp or "professional" in lower_opp:
+            base_market += 50
+        if "casual" in lower_opp:
+            base_market -= 20
+        
+        market_size = base_market + (hash_val % 150)
+        
+        # Trophi fit variation
+        base_fit = 0.5
+        if "coaching" in lower_opp or "training" in lower_opp:
+            base_fit += 0.2
+        if "ai" in lower_opp:
+            base_fit += 0.15
+        if "hardware" in lower_opp:
+            base_fit -= 0.3
+        fit_score = min(base_fit + (hash_val % 30) / 100, 1.0)
+        
+        # Priority based on keywords
+        if "urgent" in lower_opp or "fast" in lower_opp:
+            priority = "high"
+        elif "long-term" in lower_opp or "research" in lower_opp:
+            priority = "low"
+        else:
+            priority = ["high", "medium", "low"][hash_val % 3]
+        
+        # Game fit variation
+        if "cs2" in lower_opp or "counter-strike" in lower_opp:
+            game_fit = "CS2"
+        elif "valorant" in lower_opp:
+            game_fit = "VALORANT"
+        elif "league" in lower_opp or "lol" in lower_opp:
+            game_fit = "LEAGUE_OF_LEGENDS"
+        else:
+            game_fit = ["CS2", "VALORANT", "LEAGUE_OF_LEGENDS"][hash_val % 3]
+        
+        # Budget variation
+        if "enterprise" in lower_opp or "b2b" in lower_opp:
+            budget_base = 100000
+        elif "pilot" in lower_opp or "test" in lower_opp:
+            budget_base = 25000
+        else:
+            budget_base = 50000
+        budget = budget_base + ((hash_val % 100) * 1000)
         
         return {
-            "opportunity_title": opportunity[:60],
+            "opportunity_title": f"Analysis: {opportunity[:60]}",
             "market_size": market_size,
-            "market_growth_rate": 15.5 + (hash_val % 15),
-            "target_audience": "Competitive gamers aged 16-30",
-            "competitive_landscape": ["Traditional coaching", "Analytics tools"],
-            "key_trends": ["AI adoption", "Esports growth"],
+            "market_growth_rate": 15.0 + (hash_val % 25),
+            "target_audience": f"Competitive gamers interested in {opportunity.split()[0] if opportunity else 'gaming'}",
+            "competitive_landscape": [f"Platform {hash_val % 5}", f"Tool {hash_val % 7}"],
+            "key_trends": ["AI adoption", "Personalized training", "Esports growth"],
             "trophi_fit_score": fit_score,
-            "recommendation": "Validate with pilot program",
-            "risks": ["Market validation", "Competition"],
-            "budget_estimate": 25000 + ((hash_val % 100) * 1000),
-            "roi_potential": 1.5 + (fit_score * 2),
-            "game_title_fit": games[hash_val % 3],
-            "priority": priorities[hash_val % 3],
-            "metrics_to_track": ["User acquisition", "Engagement"]
+            "recommendation": f"Focus on {opportunity.split()[-1] if opportunity else 'market'} validation",
+            "risks": [f"Competition in {opportunity[:20]}", "Market entry barriers"],
+            "budget_estimate": budget,
+            "roi_potential": 1.2 + (fit_score * 2.5),
+            "game_title_fit": game_fit,
+            "priority": priority,
+            "metrics_to_track": ["User acquisition", "Engagement rate", f"{opportunity.split()[0]} conversion"] if opportunity else ["Engagement"]
         }
     
     def _generate_fallback_briefing(self, opportunity: str) -> str:
         return f"""
-# Executive Briefing: {opportunity[:50]}...
+# ⚠️ FALLBACK MODE - AI NOT CONFIGURED
 
-## Market Overview
-Estimated market size of $50-250M with strong growth in competitive gaming.
-Target demographic: competitive gamers aged 16-30 seeking performance improvement.
+**Opportunity:** {opportunity[:80]}
 
-## Competitive Landscape
-Fragmented market with traditional coaching platforms and emerging AI tools.
-Room for differentiation through technology and user experience.
+## Status
+Using static fallback data because Gemini API is not configured.
 
-## Trophi.ai Strategic Fit
-Moderate alignment with Trophi's AI coaching mission. High technical feasibility
-with potential to leverage existing infrastructure.
+## How to Fix
+1. Get free API key from: https://makersuite.google.com
+2. Add to `.streamlit/secrets.toml`
+3. Redeploy this app
+
+## Generic Analysis
+Market shows potential in competitive gaming sector. Validation needed.
 
 ## Recommendation
-Start with pilot program to validate assumptions, then scale based on data.
-
-## Key Risks
-- Market validation needed
-- Competitive response possible
-- Technical execution challenges
+Configure AI integration for detailed, customized analysis.
 """
 
+# Initialize AI engine
+ai_engine = GeminiAI()
 # ==================== API Integrations ====================
 
 class SteamSpyAPI:
