@@ -37,18 +37,18 @@ logger = get_logger()  # Will connect to Sheets if secrets available
 # SQLITE DATABASE (In-Process)
 # ============================================================================
 
-DB_PATH = "/tmp/strategic_ops.db"  # Streamlit Cloud compatible
-
+# ✅ KEEP THIS - Lazy initialization
 @st.cache_resource
 def get_db():
     """Get SQLite connection (cached per session)"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return conn
-
-def init_db():
-    """Initialize database if not exists"""
-    conn = get_db()
+    import os
+    # Ensure /tmp exists (Streamlit Cloud requirement)
+    os.makedirs("/tmp", exist_ok=True)
+    
+    conn = sqlite3.connect("/tmp/strategic_ops.db", check_same_thread=False)
     cursor = conn.cursor()
+    
+    # Create tables if they don't exist
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reviews (
             id TEXT PRIMARY KEY,
@@ -62,9 +62,11 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+    
     conn.commit()
+    return conn
 
-init_db()
+# ❌ NO init_db() call at module level!
 
 # ============================================================================
 # PYDANTIC MODELS
