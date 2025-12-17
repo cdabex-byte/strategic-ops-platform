@@ -730,7 +730,7 @@ def generate_executive_report() -> str:
 {ai_section}
 
 ## 📊 Key Metrics
-- **Total Initiative Budget:** ${total_budget:, .2f}
+- **Total Initiative Budget:** ${total_budget:,.2f}
 - **Average Risk Score:** {avg_risk:.1%}
 - **High-Priority Initiatives:** {high_priority_count}
 - **Partnership Pipeline:** ${total_pipeline:,.2f}
