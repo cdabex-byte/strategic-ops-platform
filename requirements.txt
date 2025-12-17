@@ -1,7 +1,7 @@
 streamlit==1.41.0
 httpx==0.25.1
 pydantic==2.5.0
-pandas==2.2.0
-numpy==1.26.4
+pandas>=2.2.0
+numpy>=1.26.0
 plotly==5.17.0
 rich==13.9.4
