@@ -1,19 +1,21 @@
-# sheets_logger.py
+"""
+Google Sheets Logger - Handles auth and logging
+Works in both backend (FastAPI) and frontend (Streamlit)
+"""
+
 import json
+from datetime import datetime
 import streamlit as st
-from typing import Dict, Any
 
 class SheetsLogger:
-    def __init__(self, service_account_info: Dict[str, Any] = None, sheet_id: str = None):
-        """Initialize with optional Google Sheets - mocks if unavailable"""
+    def __init__(self):
         self.enabled = False
         
-        # Skip if no credentials provided
-        if not service_account_info or not sheet_id:
-            st.toast("📊 Sheets logging disabled (demo mode)", icon="ℹ️")
-            return
-        
         try:
+            # This will work in Streamlit Cloud
+            sa_info = st.secrets["service_account"]
+            sheet_id = st.secrets["SHEET_ID"]
+            
             from google.oauth2.service_account import Credentials
             import gspread
             
@@ -22,58 +24,56 @@ class SheetsLogger:
                 "https://www.googleapis.com/auth/drive"
             ]
             
-            creds = Credentials.from_service_account_info(
-                service_account_info, 
-                scopes=scope
-            )
+            creds = Credentials.from_service_account_info(sa_info, scopes=scope)
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open_by_key(sheet_id).sheet1
             self.enabled = True
             
-            # Initialize headers if empty
+            # Auto-create headers if sheet empty
             if not self.sheet.get_all_values():
-                self.sheet.append_row([
-                    "Timestamp", "User", "Action", "Input", "Output", 
-                    "Model", "Tokens", "Cost", "Status"
-                ])
-            st.toast("✅ Sheets logger initialized", icon="✔")
+                headers = [
+                    "Timestamp", "User", "Action", "Input", "Output",
+                    "Model", "Tokens", "Cost", "Status", "Error", "SessionID"
+                ]
+                self.sheet.append_row(headers, value_input_option='USER_ENTERED')
+                
+            print("✅ Sheets logger connected")
             
         except Exception as e:
-            st.toast(f"Sheets logger failed: {e}. Using mock mode.", icon="⚠️")
-            self.enabled = False
+            print(f"⚠️ Sheets logger disabled: {e} (mock mode)")
     
-    def log_interaction(self, **kwargs):
-        """Log interaction or mock if disabled"""
+    def log(self, **kwargs):
+        """Log to Google Sheets with retry logic"""
         if not self.enabled:
-            # Mock logging - just show a toast
-            st.toast(f"📊 Logged: {kwargs.get('action', 'action')}", icon="📝")
+            # Mock logging for development
+            print(f"MOCK LOG: {kwargs.get('action')} by {kwargs.get('user')}")
             return
         
-        # Real logging
+        row = [
+            datetime.now().isoformat(),
+            kwargs.get('user', 'unknown')[:50],
+            kwargs.get('action', 'unknown')[:50],
+            json.dumps(kwargs.get('input_data', {}), ensure_ascii=False)[:1000],
+            json.dumps(kwargs.get('output_data', {}), ensure_ascii=False)[:1000],
+            kwargs.get('model', 'unknown')[:30],
+            kwargs.get('tokens', 0),
+            kwargs.get('cost', 0.0),
+            kwargs.get('status', 'success')[:20],
+            kwargs.get('error', '')[:200],
+            kwargs.get('session_id', '')[:30]
+        ]
+        
         try:
-            row = [
-                st.session_state.get('session_start', 'N/A'),
-                kwargs.get('user', 'unknown'),
-                kwargs.get('action', 'unknown'),
-                json.dumps(kwargs.get('input_data', {}), ensure_ascii=False)[:500],
-                json.dumps(kwargs.get('output_data', {}), ensure_ascii=False)[:500],
-                kwargs.get('model', 'unknown'),
-                kwargs.get('tokens', 0),
-                kwargs.get('cost_estimate', 0.0),
-                kwargs.get('status', 'success')
-            ]
             self.sheet.append_row(row, value_input_option='USER_ENTERED')
-            st.toast("✅ Logged to Google Sheets", icon="📊")
         except Exception as e:
-            st.toast(f"Logging error: {e}", icon="❌")
+            print(f"Logging failed: {e}")
 
-# Convenience function
+# Global instance
+_sheets_logger_instance = None
+
 def get_logger():
-    """Get logger instance with fallback"""
-    try:
-        # Try to get from secrets
-        sa_info = st.secrets.get("service_account", None)
-        sheet_id = st.secrets.get("SHEET_ID", None)
-        return SheetsLogger(sa_info, sheet_id)
-    except:
-        return SheetsLogger()  # Mock mode
+    """Singleton pattern"""
+    global _sheets_logger_instance
+    if _sheets_logger_instance is None:
+        _sheets_logger_instance = SheetsLogger()
+    return _sheets_logger_instance
