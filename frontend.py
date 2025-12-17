@@ -849,7 +849,7 @@ page = st.sidebar.radio(
 if page == "🔍 AI Opportunity Analysis":
     st.title("🔍 AI-Powered Opportunity Analysis")
     
-with st.expander("🐞 AI Debug Info", expanded=not ai_engine.configured):
+    with st.expander("🐞 AI Debug Info", expanded=not ai_engine.configured):
     st.json({
         "Gemini Configured": ai_engine.configured,
         "API Key Present": bool(st.secrets.get("GEMINI_API_KEY")),
