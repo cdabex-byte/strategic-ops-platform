@@ -82,37 +82,13 @@ class PartnershipDeal(BaseModel):
     value: float
     hubspot_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
-
 # ==================== Database Manager ====================
 
 class DatabaseManager:
     def __init__(self, db_path: str = Settings.DATABASE_URL):
         self.db_path = db_path
         self._init_db()
-    
-    def _init_db(self):
-        """Initialize database tables"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Initiatives table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS initiatives (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                description TEXT,
-                competitor TEXT,
-                game_title TEXT,
-                owner TEXT,
-                status TEXT,
-                priority TEXT,
-      # ==================== Database Manager ====================
-
-class DatabaseManager:
-    def __init__(self, db_path: str = Settings.DATABASE_URL):
-        self.db_path = db_path
-        self._init_db()
-        self._migrate_db()  # Add this line
+        self._migrate_db()
     
     def _init_db(self):
         """Initialize database tables"""
@@ -172,18 +148,38 @@ class DatabaseManager:
             )
         """)
         
-        # AI Analysis cache - UPDATED SCHEMA
+        # AI Analysis cache
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ai_analysis_cache (
                 opportunity_key TEXT PRIMARY KEY,
                 analysis_data TEXT,
-                briefing_text TEXT,  -- NEW COLUMN
+                briefing_text TEXT,
                 created_at TEXT
             )
         """)
         
         conn.commit()
         conn.close()
+    
+    def _migrate_db(self):
+        """Add missing columns to existing database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Check if briefing_text column exists
+            cursor.execute("PRAGMA table_info(ai_analysis_cache)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'briefing_text' not in columns:
+                print("🔄 Migrating database: adding briefing_text column...")
+                cursor.execute("ALTER TABLE ai_analysis_cache ADD COLUMN briefing_text TEXT")
+                conn.commit()
+                print("✅ Migration complete")
+        except Exception as e:
+            print(f"Migration skipped: {e}")
+        finally:
+            conn.close()
     
     def _migrate_db(self):
         """Add missing columns to existing database"""
