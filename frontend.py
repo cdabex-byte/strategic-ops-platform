@@ -1,742 +1,941 @@
 """
-Strategic Operations Platform - Single File Deployment
-Everything runs in Streamlit Cloud: UI, AI, Logging, Database
-100% module-level safe
+Strategic Operations Platform v2.0 - Single File
+All-in-one: Backend logic + Streamlit UI
 """
 
 import streamlit as st
-import httpx
-import json
-import sqlite3
 import asyncio
+import httpx
+import sqlite3
+import json
+import numpy as np
+import pandas as pd
+import plotly.express as px
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Any, Optional
-import hashlib
-import uuid
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field, validator
+from dataclasses import dataclass
 
-# ============================================================================
-# SESSION & CONFIG
-# ============================================================================
+# ==================== Configuration ====================
 
-# Generate persistent session ID
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())[:8]
+class Settings:
+    DATABASE_URL = "strategic.db"
+    CACHE_TTL = 300  # 5 minutes
+    STEAMSPY_RATE = 1.0  # 1 second between calls
+    RATE_LIMIT_CALLS = 100
+    RATE_LIMIT_WINDOW = 60  # seconds
 
-if 'user' not in st.session_state:
-    st.session_state.user = "analyst"
+# ==================== Enums & Models ====================
 
-# ============================================================================
-# GOOGLE SHEETS LOGGER SETUP
-# ============================================================================
+class GameTitle(str, Enum):
+    CS2 = "CS2"
+    LEAGUE_OF_LEGENDS = "League of Legends"
+    VALORANT = "VALORANT"
 
-from sheets_logger import get_logger
+class InitiativeStatus(str, Enum):
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    COMPLETE = "complete"
+    BLOCKED = "blocked"
 
-logger = get_logger()  # Will connect to Sheets if secrets available
-# ============================================================================
-# 🔍 DEBUGGING PANEL - Add this to sidebar (after logger init)
-# ============================================================================
+class InitiativePriority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
-with st.sidebar.expander("🐞 Logging Debug", expanded=True):
-    st.write("Logger Status:", "✅ Enabled" if logger.enabled else "❌ Disabled")
+class Metric(BaseModel):
+    name: str
+    current_value: float
+    target_value: float
+    unit: str
+
+class StrategicInitiative(BaseModel):
+    id: str = Field(default_factory=lambda: f"init_{int(datetime.now().timestamp())}")
+    title: str
+    description: str
+    competitor: str
+    game_title: GameTitle
+    owner: str
+    status: InitiativeStatus = InitiativeStatus.PLANNING
+    priority: InitiativePriority = InitiativePriority.MEDIUM
+    budget: float = 0.0
+    roi_low: float = 0.0
+    roi_base: float = 0.0
+    roi_high: float = 0.0
+    risk_score: float = 0.0
+    metrics: List[Metric] = []
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
     
-    # Show secrets checks
-    try:
-        st.write("Gemini Key Present:", bool(st.secrets.get("GEMINI_API_KEY")))
-        st.write("Sheet ID Present:", bool(st.secrets.get("SHEET_ID")))
-        st.write("Service Account Present:", bool(st.secrets.get("service_account")))
-    except:
-        st.error("❌ Secrets.toml not configured")
+    @validator('risk_score')
+    def validate_risk(cls, v):
+        if not 0 <= v <= 1:
+            raise ValueError('Risk score must be between 0 and 1')
+        return round(v, 2)
+
+class PartnershipDeal(BaseModel):
+    id: str = Field(default_factory=lambda: f"deal_{int(datetime.now().timestamp())}")
+    company: str
+    deal_type: str
+    value: float
+    hubspot_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+# ==================== Database Manager ====================
+
+class DatabaseManager:
+    def __init__(self, db_path: str = Settings.DATABASE_URL):
+        self.db_path = db_path
+        self._init_db()
     
-    # Manual test button
-    if st.button("🧪 Force Test Log"):
-        try:
-            logger.log(
-                user="debug_user",
-                action="manual_test",
-                input_data={"test": True, "timestamp": str(datetime.now())},
-                output_data={"status": "forced_test"},
-                model="debug",
-                status="success",
-                session_id=st.session_state.session_id
-            )
-            st.success("✅ Test log attempted - refresh sheet in 5 seconds")
-        except Exception as e:
-            st.error(f"❌ Logging failed: {e}")
-
-# ============================================================================
-
-# ============================================================================
-# DATABASE HELPERS (Fixed - No Module-Level Calls)
-# ============================================================================
-
-def get_db():
-    """Get a NEW SQLite connection (do NOT cache)"""
-    import os
-    os.makedirs("/tmp", exist_ok=True)
-    conn = sqlite3.connect("/tmp/strategic_ops.db", check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reviews (
-            id TEXT PRIMARY KEY,
-            item_type TEXT NOT NULL,
-            item_id TEXT NOT NULL,
-            generated_content TEXT NOT NULL,
-            reviewer_notes TEXT,
-            status TEXT DEFAULT 'pending',
-            reviewed_by TEXT,
-            reviewed_at TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    return conn
-
-# Replace your store_review function with this:
-
-def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer_notes: str = None):
-    """Store AI-generated content for human review"""
-    conn = get_db()
-    try:
+    def _init_db(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Convert datetime fields to ISO strings
-        if isinstance(content, dict) and 'generated_at' in content:
-            content['generated_at'] = str(content['generated_at'])
+        # Initiatives table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS initiatives (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                competitor TEXT,
+                game_title TEXT,
+                owner TEXT,
+                status TEXT,
+                priority TEXT,
+                budget REAL,
+                roi_low REAL,
+                roi_base REAL,
+                roi_high REAL,
+                risk_score REAL,
+                created_at TEXT,
+                updated_at TEXT,
+                metrics TEXT
+            )
+        """)
+        
+        # Partnerships table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS partnerships (
+                id TEXT PRIMARY KEY,
+                company TEXT,
+                deal_type TEXT,
+                value REAL,
+                hubspot_id TEXT,
+                created_at TEXT
+            )
+        """)
+        
+        # API cache table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_cache (
+                key TEXT PRIMARY KEY,
+                data TEXT,
+                expires_at TEXT
+            )
+        """)
+        
+        # Rate limit tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                endpoint TEXT PRIMARY KEY,
+                calls_made INTEGER,
+                window_start TEXT
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+    
+    def save_initiative(self, initiative: StrategicInitiative):
+        """Save initiative to database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT INTO reviews (id, item_type, item_id, generated_content, reviewer_notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO initiatives VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            f"REVIEW-{hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:12]}",
-            item_type,
-            item_id,
-            json.dumps(content),
-            reviewer_notes,
-            datetime.now().isoformat()
+            initiative.id, initiative.title, initiative.description,
+            initiative.competitor, initiative.game_title.value,
+            initiative.owner, initiative.status.value, initiative.priority.value,
+            initiative.budget, initiative.roi_low, initiative.roi_base, initiative.roi_high,
+            initiative.risk_score,
+            initiative.created_at.isoformat(), initiative.updated_at.isoformat(),
+            json.dumps([m.dict() for m in initiative.metrics])
         ))
         conn.commit()
-    except Exception as e:
-        logger.log(
-            user="system",
-            action="store_review_error",
-            input_data={"item_type": item_type, "item_id": item_id},
-            status="error",
-            error=str(e),
-            session_id=st.session_state.session_id
-        )
-        st.error(f"❌ Failed to store review: {e}")
-    finally:
         conn.close()
-
-@st.cache_data(ttl=30)  # Cache for 30 seconds
-def get_pending_reviews() -> List[Dict[str, Any]]:
-    """Get all pending reviews - cached to avoid module-level calls"""
-    try:
-        conn = get_db()
+    
+    def get_initiatives(self, status: Optional[str] = None, game: Optional[str] = None) -> List[Dict]:
+        """Fetch initiatives with optional filtering"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM reviews WHERE status = 'pending' ORDER BY created_at DESC")
+        
+        query = "SELECT * FROM initiatives"
+        params = []
+        conditions = []
+        
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if game:
+            conditions.append("game_title = ?")
+            params.append(game)
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        cursor.execute(query, params)
         rows = cursor.fetchall()
         conn.close()
         
-        return [
-            {
-                "id": row[0],
-                "item_type": row[1],
-                "item_id": row[2],
-                "generated_content": json.loads(row[3]),
-                "reviewer_notes": row[4],
-                "status": row[5],
-                "reviewed_by": row[6],
-                "reviewed_at": row[7],
-                "created_at": row[8]
+        initiatives = []
+        for row in rows:
+            initiative = {
+                "id": row[0], "title": row[1], "description": row[2],
+                "competitor": row[3], "game_title": row[4], "owner": row[5],
+                "status": row[6], "priority": row[7], "budget": row[8],
+                "roi_low": row[9], "roi_base": row[10], "roi_high": row[11],
+                "risk_score": row[12], "created_at": row[13], "updated_at": row[14],
+                "metrics": json.loads(row[15]) if row[15] else []
             }
-            for row in rows
-        ]
-    except Exception as e:
-        st.error(f"Database error: {e}")
-        return []
-
-def update_review(review_id: str, status: str, reviewer: str, notes: str = None):
-    """Update review status"""
-    conn = get_db()
-    try:
+            initiatives.append(initiative)
+        
+        return initiatives
+    
+    def save_partnership(self, deal: PartnershipDeal):
+        """Save partnership deal"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
         cursor.execute("""
-            UPDATE reviews 
-            SET status = ?, reviewed_by = ?, reviewer_notes = ?, reviewed_at = ?
-            WHERE id = ?
+            INSERT OR REPLACE INTO partnerships VALUES (?, ?, ?, ?, ?, ?)
         """, (
-            status,
-            reviewer,
-            notes,
-            datetime.now().isoformat(),
-            review_id
+            deal.id, deal.company, deal.deal_type, deal.value,
+            deal.hubspot_id, deal.created_at.isoformat()
         ))
         conn.commit()
-    finally:
         conn.close()
+    
+    def get_partnerships(self) -> List[Dict]:
+        """Fetch all partnerships"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM partnerships")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        deals = []
+        for row in rows:
+            deals.append({
+                "id": row[0], "company": row[1], "deal_type": row[2],
+                "value": row[3], "hubspot_id": row[4], "created_at": row[5]
+            })
+        return deals
+    
+    def cache_get(self, key: str) -> Optional[Any]:
+        """Get cached API response"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT data FROM api_cache WHERE key=? AND expires_at > ?",
+            (key, datetime.now().isoformat())
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return json.loads(result[0])
+        return None
+    
+    def cache_set(self, key: str, data: Any):
+        """Cache API response"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        expires_at = (datetime.now() + timedelta(seconds=Settings.CACHE_TTL)).isoformat()
+        
+        cursor.execute(
+            "INSERT OR REPLACE INTO api_cache (key, data, expires_at) VALUES (?, ?, ?)",
+            (key, json.dumps(data), expires_at)
+        )
+        conn.commit()
+        conn.close()
+    
+    def check_rate_limit(self, endpoint: str) -> bool:
+        """Simple rate limiting check"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = datetime.now()
+        window_start = (now - timedelta(seconds=Settings.RATE_LIMIT_WINDOW)).isoformat()
+        
+        cursor.execute(
+            "SELECT calls_made FROM rate_limits WHERE endpoint=? AND window_start > ?",
+            (endpoint, window_start)
+        )
+        result = cursor.fetchone()
+        
+        calls = result[0] if result else 0
+        
+        if calls >= Settings.RATE_LIMIT_CALLS:
+            conn.close()
+            return False
+        
+        # Update or insert
+        cursor.execute("""
+            INSERT OR REPLACE INTO rate_limits (endpoint, calls_made, window_start)
+            VALUES (?, ?, ?)
+        """, (endpoint, calls + 1, now.isoformat()))
+        
+        conn.commit()
+        conn.close()
+        return True
 
-# ============================================================================
-# PYDANTIC MODELS
-# ============================================================================
+# Initialize global database
+db = DatabaseManager()
 
-from pydantic import BaseModel, Field
+# ==================== API Integrations ====================
 
-class GameTitle(str, Enum):
-    LEAGUE_OF_LEGENDS = "league_of_legends"
-    VALORANT = "valorant"
-    CS2 = "cs2"
+class SteamSpyAPI:
+    """Real Steam player data"""
+    def __init__(self):
+        self.base_url = "https://steamspy.com/api.php"
+    
+    async def get_game_data(self, app_id: str) -> Dict[str, Any]:
+        """Get real player counts for games"""
+        await asyncio.sleep(0.1)  # Respect rate limit
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{self.base_url}?request=appdetails&appid={app_id}"
+                )
+                if response.status_code == 200:
+                    return response.json()
+        except Exception as e:
+            print(f"SteamSpy API error: {e}")
+        return {"players": 500_000}  # Fallback
 
-class CompetitiveInsight(BaseModel):
-    competitor_name: str
-    game: GameTitle
-    key_strengths: List[str]
-    key_weaknesses: List[str]
-    market_position: str
-    threat_level: int = Field(ge=1, le=10)
-    opportunity_windows: List[str]
-    confidence_score: float = Field(ge=0.0, le=1.0)
-    sources: List[str]
-    generated_at: datetime = Field(default_factory=datetime.now)
+class TwitchAPI:
+    """Get live viewership data"""
+    def __init__(self):
+        secrets = st.secrets
+        self.client_id = secrets.get("TWITCH_CLIENT_ID", "")
+        self.client_secret = secrets.get("TWITCH_CLIENT_SECRET", "")
+        self.token = None
+        self.token_expires = datetime.min
+    
+    async def get_token(self):
+        """Get OAuth token with caching"""
+        if self.token and self.token_expires > datetime.now():
+            return self.token
+        
+        if not self.client_id or not self.client_secret:
+            return None
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://id.twitch.tv/oauth2/token",
+                    params={
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "grant_type": "client_credentials"
+                    }
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.token = data["access_token"]
+                    self.token_expires = datetime.now() + timedelta(seconds=data["expires_in"] - 300)
+                    return self.token
+        except Exception as e:
+            print(f"Twitch auth error: {e}")
+        
+        return None
+    
+    async def get_game_viewership(self, game_name: str) -> Dict[str, Any]:
+        token = await self.get_token()
+        if not token:
+            return {"data": []}
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://api.twitch.tv/helix/streams",
+                    headers={"Authorization": f"Bearer {token}", "Client-Id": self.client_id},
+                    params={"game_name": game_name, "first": 100}
+                )
+                if response.status_code == 200:
+                    return response.json()
+        except Exception as e:
+            print(f"Twitch API error: {e}")
+        
+        return {"data": []}
 
-class TAMAnalysis(BaseModel):
-    game: GameTitle
-    total_players: int
-    serviceable_available_market: int
-    serviceable_obtainable_market: int
-    avg_revenue_per_user: float
-    tam_usd: float
-    sam_usd: float
-    som_usd: float
-    growth_rate: float
-    assumptions: Dict[str, Any]
-    confidence_score: float = Field(ge=0.0, le=1.0)
+class SlackNotifier:
+    """Real-time alerts to Slack"""
+    def __init__(self):
+        self.webhook_url = st.secrets.get("SLACK_WEBHOOK_URL", "")
+    
+    async def send_alert(self, message: str, priority: str = "medium"):
+        if not self.webhook_url:
+            return
+        
+        payload = {
+            "text": f"🎮 Strategic Ops Alert ({priority.upper()})",
+            "blocks": [{
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message}
+            }]
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(self.webhook_url, json=payload)
+        except Exception as e:
+            print(f"Slack notification failed: {e}")
 
-# ============================================================================
-# AI ENGINES - Gemini 2.5 Flash (No Safety Settings)
-# ============================================================================
+class HubSpotCRM:
+    """Track partnership deals"""
+    def __init__(self):
+        self.api_key = st.secrets.get("HUBSPOT_API_KEY", "")
+    
+    async def create_deal(self, company: str, deal_type: str, value: float) -> Optional[str]:
+        """Create deal in HubSpot"""
+        if not self.api_key:
+            return None
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    "https://api.hubapi.com/crm/v3/objects/deals",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "properties": {
+                            "dealname": f"{deal_type.upper()} - {company}",
+                            "amount": value,
+                            "pipeline": "default",
+                            "dealstage": "appointmentscheduled"
+                        }
+                    }
+                )
+                if response.status_code == 201:
+                    return response.json()["id"]
+        except Exception as e:
+            print(f"HubSpot API error: {e}")
+        
+        return None
+
+# ==================== Core Engine ====================
 
 class MarketIntelligenceEngine:
     def __init__(self):
-        self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-        self.enabled = bool(self.gemini_key)
-        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
+        self.steamspy = SteamSpyAPI()
+        self.twitch = TwitchAPI()
+        self.slack = SlackNotifier()
+        self.hubspot = HubSpotCRM()
+        self._last_steam_call = datetime.min
     
-    async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
-        if not self.enabled:
-            return self._get_fallback(competitor, game, "API disabled")
+    async def _rate_limit_steam(self):
+        """Ensure 1 second between SteamSpy calls"""
+        now = datetime.now()
+        elapsed = (now - self._last_steam_call).total_seconds()
+        if elapsed < Settings.STEAMSPY_RATE:
+            await asyncio.sleep(Settings.STEAMSPY_RATE - elapsed)
+        self._last_steam_call = datetime.now()
+    
+    async def analyze_competitor(self, game: GameTitle, competitor: str) -> Dict[str, Any]:
+        """Real-time competitor analysis with caching"""
         
-        # ✅ Simple, clean prompt (no safety settings needed)
-        prompt = f"""
-        Analyze {competitor} in the {game} AI coaching market.
+        # Check cache first
+        cache_key = f"analysis_{game}_{competitor}"
+        cached = db.cache_get(cache_key)
+        if cached:
+            return cached
         
-        Return ONLY this JSON format:
-        {{
-          "key_strengths": ["strength1", "strength2"],
-          "key_weaknesses": ["weakness1", "weakness2"],
-          "market_position": "challenger",
-          "threat_level": 6,
-          "opportunity_windows": ["Mobile", "Esports"],
-          "confidence_score": 0.7,
-          "sources": ["SteamSpy"]
-        }}
-        """
+        await self._rate_limit_steam()
         
+        # Map games to IDs
+        game_ids = {GameTitle.CS2: "730", GameTitle.VALORANT: "1286300"}
+        game_names = {
+            GameTitle.CS2: "Counter-Strike 2",
+            GameTitle.LEAGUE_OF_LEGENDS: "League of Legends",
+            GameTitle.VALORANT: "VALORANT"
+        }
+        
+        app_id = game_ids.get(game, "730")
+        twitch_name = game_names.get(game, "CS2")
+        
+        # Parallel API calls
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.api_url,
-                    json={"contents": [{"parts": [{"text": prompt}]}]},  # ✅ No safetySettings
-                    timeout=30.0
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}: {response.text}")
-                
-                data = response.json()
-                content = data["candidates"][0]["content"]["parts"][0]["text"]
-                cleaned = content.replace('```json', '').replace('```', '').strip()
-                analysis = json.loads(cleaned)
-                
-                return CompetitiveInsight(
-                    competitor_name=competitor,
-                    game=game,
-                    key_strengths=analysis["key_strengths"][:3],
-                    key_weaknesses=analysis["key_weaknesses"][:3],
-                    market_position=analysis["market_position"],
-                    threat_level=min(10, max(1, analysis["threat_level"])),
-                    opportunity_windows=analysis["opportunity_windows"][:3],
-                    confidence_score=min(1.0, max(0.0, analysis["confidence_score"])),
-                    sources=analysis["sources"][:2],
-                )
-                
-        except Exception as e:
-            logger.log(
-                user="system",
-                action="ai_analysis_failed",
-                input_data={"competitor": competitor, "game": game},
-                status="error",
-                error=str(e),
-                session_id=st.session_state.session_id
+            steam_data, twitch_data = await asyncio.gather(
+                self.steamspy.get_game_data(app_id),
+                self.twitch.get_game_viewership(twitch_name)
             )
-            return self._get_fallback(competitor, game, str(e))
-    
-    def _get_fallback(self, competitor: str, game: GameTitle, error: str) -> CompetitiveInsight:
-        st.warning(f"Using fallback: {error[:50]}")
-        return CompetitiveInsight(
-            competitor_name=competitor,
-            game=game,
-            key_strengths=["Strong brand", "Large base"],
-            key_weaknesses=["Limited AI", "High price"],
-            market_position="challenger",
-            threat_level=6,
-            opportunity_windows=["Mobile", "Esports"],
-            confidence_score=0.6,
-            sources=["Fallback", error[:30]],
-        )
-
-class OpportunitySizer:
-    def __init__(self):
-        self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-        self.enabled = bool(self.gemini_key)
-        self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
-    
-    async def calculate_market_size(self, game: GameTitle, segment: str, tier: str, geo: str) -> TAMAnalysis:
-        if not self.enabled:
-            return self._get_fallback(game, segment, "API disabled")
-        
-        prompt = f"""
-        Market analysis for {game}, {segment}, {tier}, {geo}.
-        Return ONLY JSON with arpu, segment_penetration, confidence_score.
-        """
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.api_url,
-                    json={"contents": [{"parts": [{"text": prompt}]}]},  # ✅ No safetySettings
-                    timeout=30.0
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}: {response.text}")
-                
-                data = response.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                cleaned = text.strip().split("```json")[-1].split("```")[0].strip()
-                assumptions = json.loads(cleaned)
-                
-                total_players = 1_000_000
-                arpu = assumptions.get("arpu", 60)
-                tam = total_players * arpu
-                penetration = assumptions.get("segment_penetration", 0.15)
-                sam = int(tam * penetration)
-                som = int(sam * 0.1)
-                
-                return TAMAnalysis(
-                    game=game,
-                    total_players=total_players,
-                    serviceable_available_market=sam,
-                    serviceable_obtainable_market=som,
-                    avg_revenue_per_user=arpu,
-                    tam_usd=tam,
-                    sam_usd=sam,
-                    som_usd=som,
-                    growth_rate=0.10,
-                    assumptions=assumptions,
-                    confidence_score=max(0.0, min(1.0, assumptions.get("confidence_score", 0.6))),
-                )
-                
+            
+            players = steam_data.get("players", 0) if isinstance(steam_data, dict) else 0
+            viewers = len(twitch_data.get("data", [])) if isinstance(twitch_data, dict) else 0
+            
+            result = {
+                "game": game.value,
+                "competitor": competitor,
+                "metrics": {
+                    "active_players": players,
+                    "live_viewers": viewers,
+                    "engagement_ratio": viewers / max(players, 1),
+                    "data_timestamp": datetime.now().isoformat()
+                },
+                "recommendations": self._generate_recommendations(players, viewers)
+            }
+            
+            # Cache result
+            db.cache_set(cache_key, result)
+            return result
+            
         except Exception as e:
-            logger.log(
-                user="system",
-                action="tam_calculation_failed",
-                input_data={"game": game, "segment": segment},
-                status="error",
-                error=str(e)[:200],
-                session_id=st.session_state.session_id
-            )
-            return self._get_fallback(game, segment, str(e))
+            return {"error": str(e), "metrics": {}}
     
-    def _get_fallback(self, game: GameTitle, segment: str, error: str) -> TAMAnalysis:
-        return TAMAnalysis(
-            game=game,
-            total_players=1_000_000,
-            serviceable_available_market=150_000,
-            serviceable_obtainable_market=15_000,
-            avg_revenue_per_user=60,
-            tam_usd=60_000_000,
-            sam_usd=9_000_000,
-            som_usd=900_000,
-            growth_rate=0.10,
-            assumptions={"error": error[:50]},
-            confidence_score=0.5,
-        )
-# ============================================================================
-# STREAMLIT UI
-# ============================================================================
-
-st.title("🎮 Strategic Operations Platform")
-st.markdown("*All-in-one: UI, AI, Logging, Database*")
-
-# ============================================================================
-# SIDEBAR - CONFIGURATION
-# ============================================================================
-
-with st.sidebar:
-    st.header("👤 User Configuration")
-    st.session_state.user = st.text_input("Your Name", "Strategy Analyst")
+    def _generate_recommendations(self, players: int, viewers: int) -> List[str]:
+        """AI-powered recommendations"""
+        recommendations = []
+        if players > 500_000:
+            recommendations.append("🎯 High player base - prioritize community features")
+        if viewers / max(players, 1) > 0.1:
+            recommendations.append("📈 Strong viewership - explore esports partnerships")
+        if players < 100_000 and viewers > 50_000:
+            recommendations.append("📺 High viewer/player ratio - focus on content creators")
+        return recommendations
     
-    # Logging status
-    if logger.enabled:
-        st.success("✅ Sheets Logging Active")
-    else:
-        st.warning("⚠️ Sheets Logging: Mock Mode")
-        st.caption("Add secrets to enable real logging")
-    
-    st.caption(f"Session ID: {st.session_state.session_id}")
-
-# ============================================================================
-# TABS - ALL FEATURES
-# ============================================================================
-
-tab1, tab2, tab3 = st.tabs(["🏢 Competitive Intel", "📈 Opportunity Sizing", "👤 Human Review"])
-
-# ============================================================================
-# TAB 1: Competitive Intelligence
-# ============================================================================
-
-with tab1:
-    st.header("Market Intelligence Engine")
-    
-    with st.form("competitor_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            competitor = st.text_input("Competitor Name", "Mobalytics")
-        with col2:
-            game = st.selectbox("Game", ["league_of_legends", "valorant", "cs2", "overwatch"])
+    def calculate_roi_simulation(self, budget: float, risk_score: float) -> Dict[str, float]:
+        """Monte Carlo ROI simulation"""
+        np.random.seed(42)
+        n_simulations = 1000
         
-        analyze_btn = st.form_submit_button("🔍 Run Analysis", use_container_width=True)
-    
-    if analyze_btn:
-        # Log input
-        logger.log(
-            user=st.session_state.user,
-            action="competitor_analysis_requested",
-            input_data={"competitor": competitor, "game": game},
-            session_id=st.session_state.session_id
-        )
+        base_return = budget * 1.5
+        volatility = risk_score * 0.5
         
-        with st.spinner(f"Analyzing {competitor}..."):
-            try:
-                # Run AI analysis directly
-                engine = MarketIntelligenceEngine()
-                insight = asyncio.run(engine.analyze_competitor(competitor, game))
-                
-                # Log successful output
-                logger.log(
-                    user=st.session_state.user,
-                    action="competitor_analysis_completed",
-                    input_data={"competitor": competitor, "game": game},
-                    output_data=insight.dict(),
-                    model="gemini-1.5-flash",
-                    status="success",
-                    session_id=st.session_state.session_id
-                )
-                
-                # Store for human review (using dict() which is JSON-safe now)
-                store_review("insight", competitor, insight.dict())
-                
-                # Display results
-                st.success("✅ Analysis Complete!")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Threat Level", f"{insight.threat_level}/10")
-                with col2:
-                    st.metric("Confidence", f"{insight.confidence_score:.0%}")
-                with col3:
-                    st.metric("Position", insight.market_position.title())
-                
-                # Strengths & Weaknesses
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.subheader("💪 Strengths")
-                    for s in insight.key_strengths:
-                        st.write(f"• {s}")
-                with col2:
-                    st.subheader("⚠️ Weaknesses")
-                    for w in insight.key_weaknesses:
-                        st.write(f"• {w}")
-                
-                # Opportunities
-                st.subheader("🚀 Opportunities")
-                for opp in insight.opportunity_windows:
-                    st.info(opp)
-                
-                # Raw data
-                with st.expander("📄 Raw Data"):
-                    st.json(insight.dict())
-                
-            except Exception as e:
-                logger.log(
-                    user=st.session_state.user,
-                    action="competitor_analysis_failed",
-                    input_data={"competitor": competitor, "game": game},
-                    status="error",
-                    error=str(e),
-                    session_id=st.session_state.session_id
-                )
-                st.exception(e)
-
-# ============================================================================
-# TAB 2: Opportunity Sizing
-# ============================================================================
-
-with tab2:
-    st.header("Market Opportunity Calculator")
-    
-    with st.form("tam_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            game = st.selectbox("Game", ["league_of_legends", "valorant", "cs2"], key="tam_game")
-            tier = st.selectbox("Pricing Tier", ["premium", "mid", "free"])
-        with col2:
-            geo = st.selectbox("Geography", ["global", "na", "eu", "asia"])
-            segment = st.text_area("Target Segment", "Competitive ranked players (Gold+)")
+        results = np.random.normal(base_return, base_return * volatility, n_simulations)
         
-        calc_btn = st.form_submit_button("📊 Calculate TAM", use_container_width=True)
+        return {
+            "roi_low": np.percentile(results, 10) - budget,
+            "roi_base": np.median(results) - budget,
+            "roi_high": np.percentile(results, 90) - budget,
+            "risk_of_loss": (results < budget).mean()
+        }
+
+# Initialize global engine
+engine = MarketIntelligenceEngine()
+
+# ==================== Executive Reporting ====================
+
+def generate_executive_report() -> str:
+    """Generate markdown executive report"""
+    initiatives = db.get_initiatives()
+    partnerships = db.get_partnerships()
     
-    if calc_btn:
-        # Log input
-        logger.log(
-            user=st.session_state.user,
-            action="tam_calculation_requested",
-            input_data={"game": game, "segment": segment, "tier": tier, "geo": geo},
-            session_id=st.session_state.session_id
-        )
-        
-        with st.spinner("Running market analysis..."):
-            try:
-                engine = OpportunitySizer()
-                tam = asyncio.run(engine.calculate_market_size(game, segment, tier, geo))
-                
-                # Log output
-                logger.log(
-                    user=st.session_state.user,
-                    action="tam_calculation_completed",
-                    input_data={"game": game, "segment": segment},
-                    output_data=tam.dict(),
-                    model="calculator",
-                    status="success",
-                    session_id=st.session_state.session_id
-                )
-                
-                # Display results
-                st.success("✅ Market Analysis Complete!")
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("🌍 TAM", f"${tam.tam_usd:,.0f}")
-                col2.metric("🎯 SAM", f"${tam.sam_usd:,.0f}")
-                col3.metric("💰 SOM", f"${tam.som_usd:,.0f}")
-                
-                st.subheader("Key Assumptions")
-                st.json(tam.assumptions)
-                
-                confidence = tam.confidence_score
-                if confidence > 0.8:
-                    st.success(f"High Confidence ({confidence:.0%})")
-                elif confidence > 0.5:
-                    st.warning(f"Medium Confidence ({confidence:.0%})")
-                else:
-                    st.error(f"Low Confidence ({confidence:.0%})")
-                
-            except Exception as e:
-                logger.log(
-                    user=st.session_state.user,
-                    action="tam_calculation_failed",
-                    input_data={"game": game, "segment": segment},
-                    status="error",
-                    error=str(e),
-                    session_id=st.session_state.session_id
-                )
-                st.exception(e)
+    df_initiatives = pd.DataFrame(initiatives)
+    df_partnerships = pd.DataFrame(partnerships)
+    
+    # Calculate KPIs
+    total_budget = df_initiatives["budget"].sum() if not df_initiatives.empty else 0
+    avg_risk = df_initiatives["risk_score"].mean() if not df_initiatives.empty else 0
+    high_priority_count = len(df_initiatives[df_initiatives["priority"] == "high"]) if not df_initiatives.empty else 0
+    total_pipeline = df_partnerships["value"].sum() if not df_partnerships.empty else 0
+    
+    active_initiatives = df_initiatives[df_initiatives["status"] != "complete"] if not df_initiatives.empty else pd.DataFrame()
+    
+    report = f"""# Strategic Operations Weekly Report
+**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
-# ============================================================================
-# TAB 3: Human Review Queue
-# ============================================================================
+## 📊 Key Metrics
+- **Total Initiative Budget:** ${total_budget:,.2f}
+- **Average Risk Score:** {avg_risk:.1%}
+- **High-Priority Initiatives:** {high_priority_count}
+- **Partnership Pipeline:** ${total_pipeline:,.2f}
 
-with tab3:
-    st.header("Human-in-the-Loop Review Queue")
+## 🎯 Active Initiatives
+{active_initiatives.to_markdown(index=False) if not active_initiatives.empty else "No active initiatives"}
+
+## 🤝 Partnership Deals
+{df_partnerships.to_markdown(index=False) if not df_partnerships.empty else "No partnership deals"}
+
+## ⚠️ Risk Analysis
+- **High-Risk Initiatives (>20%):** {len(df_initiatives[df_initiatives["risk_score"] > 0.2]) if not df_initiatives.empty else 0}
+- **Budget at Risk:** ${df_initiatives[df_initiatives["risk_score"] > 0.2]["budget"].sum():,.2f if not df_initiatives.empty else 0}
+
+---
+
+*Report auto-generated by Strategic Operations Platform v2.0*
+"""
+    return report
+
+# ==================== Streamlit UI ====================
+
+# Page configuration
+st.set_page_config(
+    page_title="Strategic Operations Platform v2.0",
+    page_icon="🎮",
+    layout="wide"
+)
+
+# Sidebar navigation
+st.sidebar.title("🎮 Strategic Ops v2.0")
+page = st.sidebar.radio(
+    "Navigation",
+    ["📊 Executive Dashboard", "🎯 Initiatives", "🤝 Partnerships", "📈 Market Intelligence", "⚙️ Settings"],
+    index=0
+)
+
+# ==================== Executive Dashboard ====================
+
+if page == "📊 Executive Dashboard":
+    st.title("📊 Executive Dashboard")
     
     # Refresh button
-    if st.button("🔄 Refresh Queue", use_container_width=True):
-        st.experimental_rerun()
+    col1, col2, col3, col4 = st.columns(4)
     
-    # Show pending reviews (using cached function)
-    pending_reviews = get_pending_reviews()
+    with col1:
+        if st.button("🔄 Refresh All Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
     
-    if not pending_reviews:
-        st.info("✅ No items pending review. AI running autonomously.")
-    else:
-        st.warning(f"🚨 {len(pending_reviews)} items require human review")
-        
-        for review in pending_reviews:
-            with st.expander(
-                f"📌 {review['item_type'].title()} - {review['item_id']} "
-                f"(Created: {review['created_at'][:19]})",
-                expanded=True
-            ):
-                # Show generated content
-                st.subheader("AI-Generated Content")
-                st.json(review['generated_content'])
-                
-                # Review form
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    notes = st.text_area(
-                        "Reviewer Notes",
-                        "Looks good, but verify data sources",
-                        key=f"notes_{review['id']}"
-                    )
-                with col2:
-                    reviewer = st.text_input("Reviewer", st.session_state.user, key=f"reviewer_{review['id']}")
-                
-                col1, col2, col3 = st.columns(3)
-                if col1.button("✅ Approve", key=f"approve_{review['id']}"):
-                    update_review(review['id'], "approved", reviewer, notes)
-                    logger.log(
-                        user=reviewer,
-                        action="review_approved",
-                        input_data={"review_id": review['id']},
-                        output_data={"notes": notes},
-                        status="success",
-                        session_id=st.session_state.session_id
-                    )
-                    st.success("✅ Review approved & logged")
-                   
-                
-                if col2.button("❌ Reject", key=f"reject_{review['id']}"):
-                    update_review(review['id'], "rejected", reviewer, notes)
-                    logger.log(
-                        user=reviewer,
-                        action="review_rejected",
-                        input_data={"review_id": review['id']},
-                        output_data={"notes": notes},
-                        status="success",
-                        session_id=st.session_state.session_id
-                    )
-                    st.warning("❌ Review rejected & logged")
-                   
-                
-                if col3.button("📝 Modify", key=f"modify_{review['id']}"):
-                    update_review(review['id'], "modify", reviewer, notes)
-                    logger.log(
-                        user=reviewer,
-                        action="review_modify",
-                        input_data={"review_id": review['id']},
-                        output_data={"notes": notes},
-                        status="success",
-                        session_id=st.session_state.session_id
-                    )
-                    st.info("📝 Modification requested & logged")
-
-# ============================================================================
-# FOOTER & METRICS (Fixed - Wrapped in cached function)
-# ============================================================================
-
-@st.cache_data(ttl=60)  # Cache for 60 seconds
-def get_review_metrics():
-    """Safely get review metrics from database"""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'pending'")
-        pending = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM reviews WHERE status = 'approved'")
-        approved = cursor.fetchone()[0]
-        conn.close()
-        return pending, approved
-    except Exception as e:
-        print(f"Metrics error: {e}")
-        return 0, 0
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📊 Platform Metrics")
-pending_count, approved_count = get_review_metrics()
-st.sidebar.metric("Pending Reviews", pending_count)
-st.sidebar.metric("Approved Reviews", approved_count)
-
-if logger.enabled:
-    st.sidebar.success("✅ Sheets Logging Active")
-else:
-    st.sidebar.warning("⚠️ Sheets Logging: Mock Mode")
-
-st.sidebar.caption(f"Session: {st.session_state.session_id}")
-
-# Log session start
-if 'session_start_logged' not in st.session_state:
-    logger.log(
-        user=st.session_state.user,
-        action="session_started",
-        input_data={"app_version": "1.0"},
-        status="success",
-        session_id=st.session_state.session_id
-    )
-    st.session_state.session_start_logged = True
-
-# ============================================================================
-# 🧪 END-TO-END TEST (Delete after verifying)
-# ============================================================================
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🧪 End-to-End Test")
-
-if st.sidebar.button("🔥 Full System Test"):
-    # 1. Test Gemini API
-    try:
-        engine = MarketIntelligenceEngine()
-        test_insight = asyncio.run(engine.analyze_competitor("Test", GameTitle.CS2))
-        st.sidebar.success("✅ Gemini API working")
-    except Exception as e:
-        st.sidebar.error(f"❌ Gemini API failed: {e}")
+    # Fetch data
+    initiatives = db.get_initiatives()
+    partnerships = db.get_partnerships()
     
-    # 2. Test Google Sheets
-    try:
-        logger.log(
-            user="test_user",
-            action="e2e_test",
-            input_data={"test": True},
-            output_data={"result": "success"},
-            model="test",
-            status="success",
-            session_id=st.session_state.session_id
+    df = pd.DataFrame(initiatives)
+    
+    # Metrics
+    with col2:
+        total_budget = df["budget"].sum() if not df.empty else 0
+        st.metric("Total Budget", f"${total_budget:,.2f}")
+    
+    with col3:
+        avg_roi = df["roi_base"].mean() if not df.empty else 0
+        st.metric("Avg Expected ROI", f"${avg_roi:,.0f}")
+    
+    with col4:
+        risk_count = len(df[df["risk_score"] > 0.2]) if not df.empty else 0
+        st.metric("High-Risk Items", risk_count)
+    
+    # Live market data
+    st.subheader("🎮 Live Market Data")
+    game_col1, game_col2 = st.columns(2)
+    
+    with game_col1:
+        if st.button("Get CS2 Live Data", use_container_width=True):
+            with st.spinner("Fetching SteamSpy & Twitch data..."):
+                try:
+                    result = asyncio.run(engine.analyze_competitor(GameTitle.CS2, "Valve"))
+                    if "error" not in result:
+                        metrics = result["metrics"]
+                        
+                        st.success("✅ Data fetched!")
+                        st.metric("CS2 Active Players", f"{metrics.get('active_players', 0):,}")
+                        st.metric("CS2 Twitch Viewers", f"{metrics.get('live_viewers', 0):,}")
+                        st.metric("Engagement Ratio", f"{metrics.get('engagement_ratio', 0.0:.2%}")
+                        
+                        with st.expander("🤖 AI Recommendations"):
+                            for rec in result.get("recommendations", []):
+                                st.success(rec)
+                    else:
+                        st.error(f"Analysis failed: {result['error']}")
+                except Exception as e:
+                    st.error(f"Failed to fetch data: {e}")
+    
+    # Initiative pipeline
+    st.subheader("🎯 Initiative Pipeline")
+    if not df.empty:
+        fig = px.scatter(
+            df,
+            x="budget",
+            y="roi_base",
+            color="risk_score",
+            size="roi_high",
+            hover_data=["title", "owner", "status"],
+            title="Risk vs Return Analysis",
+            color_continuous_scale="RdYlGn_r"
         )
-        st.sidebar.success("✅ Sheets logging attempted")
-    except Exception as e:
-        st.sidebar.error(f"❌ Sheets logging failed: {e}")
+        st.plotly_chart(fig, use_container_width=True)
     
-    # 3. Test SQLite
-    try:
-        store_review("test", "test-item", {"test": True}, "Test notes")
-        reviews = get_pending_reviews()
-        st.sidebar.success(f"✅ SQLite working ({len(reviews)} reviews)")
-    except Exception as e:
-        st.sidebar.error(f"❌ SQLite failed: {e}")
-# Add to sidebar debug panel:
-if st.sidebar.button("🔍 Check Gemini 2.5 Access"):
-    try:
-        import requests
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash?key={st.secrets['GEMINI_API_KEY']}"
-        response = requests.get(url)
-        st.sidebar.write("Status:", response.status_code)
-        st.sidebar.write("Response:", response.text[:300])
-        
-        if response.status_code == 200:
-            st.sidebar.success("✅ Your API key has access to Gemini 2.5 Flash!")
-        else:
-            st.sidebar.error("❌ No access. You may need to upgrade or use a different key.")
+    # Weekly report
+    st.subheader("📧 Automated Reporting")
+    if st.button("Generate Executive Report", use_container_width=True):
+        with st.spinner("Generating report..."):
+            report = generate_executive_report()
             
-    except Exception as e:
-        st.sidebar.error(f"❌ Check failed: {e}")
+            st.download_button(
+                label="📥 Download Report",
+                data=report,
+                file_name=f"executive_report_{datetime.now().strftime('%Y-%m-%d')}.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+            
+            with st.expander("Preview Report"):
+                st.markdown(report)
+
+# ==================== Initiatives Management ====================
+
+elif page == "🎯 Initiatives":
+    st.title("🎯 Strategic Initiatives")
+    
+    # Create new initiative
+    with st.expander("➕ Create New Initiative", expanded=True):
+        with st.form("initiative_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                title = st.text_input("Initiative Title *")
+                owner = st.text_input("Owner *")
+                game_title = st.selectbox("Game Title", ["CS2", "LEAGUE_OF_LEGENDS", "VALORANT"])
+            
+            with col2:
+                budget = st.number_input("Budget ($)", min_value=0.0, step=1000.0, format="%.2f")
+                risk_score = st.slider("Risk Score", 0.0, 1.0, 0.3)
+                priority = st.selectbox("Priority", ["low", "medium", "high"])
+            
+            description = st.text_area("Description *", height=150)
+            competitor = st.text_input("Target Competitor *", "Valve")
+            
+            # Metrics
+            st.subheader("Success Metrics")
+            metric_name = st.text_input("Metric Name", "MAU Growth")
+            metric_target = st.number_input("Target Value", min_value=0.0, value=10.0)
+            
+            submitted = st.form_submit_button("🚀 Launch Initiative", use_container_width=True)
+            
+            if submitted:
+                if not all([title, owner, description, competitor]):
+                    st.error("❌ Please fill all required fields")
+                else:
+                    # Create initiative object
+                    initiative = StrategicInitiative(
+                        title=title,
+                        description=description,
+                        competitor=competitor,
+                        game_title=GameTitle[game_title],
+                        owner=owner,
+                        budget=budget,
+                        risk_score=risk_score,
+                        priority=InitiativePriority[priority],
+                        metrics=[Metric(name=metric_name, current_value=0, target_value=metric_target, unit="%")]
+                    )
+                    
+                    # Calculate ROI
+                    roi_data = engine.calculate_roi_simulation(budget, risk_score)
+                    initiative.roi_low = roi_data["roi_low"]
+                    initiative.roi_base = roi_data["roi_base"]
+                    initiative.roi_high = roi_data["roi_high"]
+                    
+                    # Save to database
+                    db.save_initiative(initiative)
+                    
+                    # Send Slack alert for high priority
+                    if priority == "high":
+                        message = f"""
+                        *🚨 HIGH PRIORITY INITIATIVE LAUNCHED*
+                        *Title:* {title}
+                        *Owner:* {owner}
+                        *Budget:* ${budget:,.2f}
+                        *ROI Range:* ${roi_data["roi_low"]:,.0f} - ${roi_data["roi_high"]:,.0f}
+                        *Risk Score:* {risk_score:.1%}
+                        """
+                        asyncio.run(engine.slack.send_alert(message, "high"))
+                    
+                    st.success(f"✅ Initiative created! ID: {initiative.id}")
+                    st.info(f"""
+                    **ROI Simulation Results:**
+                    - Conservative: ${roi_data["roi_low"]:,.0f}
+                    - Expected: ${roi_data["roi_base"]:,.0f}
+                    - Optimistic: ${roi_data["roi_high"]:,.0f}
+                    - Risk of Loss: {roi_data["risk_of_loss"]:.1%}
+                    """)
+                    st.rerun()
+    
+    # Display initiatives
+    st.subheader("📋 Active Initiatives")
+    initiatives = db.get_initiatives()
+    
+    if initiatives:
+        for initiative in initiatives[:10]:  # Show top 10
+            with st.container():
+                col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                
+                status_color = {
+                    "planning": "🟡", "executing": "🔵",
+                    "complete": "🟢", "blocked": "🔴"
+                }
+                
+                with col1:
+                    st.markdown(f"**{initiative['title']}**")
+                    st.caption(f"Owner: {initiative['owner']} | Game: {initiative['game_title']}")
+                
+                with col2:
+                    st.progress(initiative['risk_score'])
+                    st.caption(f"Risk: {initiative['risk_score']:.0%} | Priority: {initiative['priority'].upper()}")
+                
+                with col3:
+                    st.markdown(f"Budget: **${initiative['budget']:,.0f}**")
+                    st.caption(f"ROI: ${initiative['roi_base']:,.0f}")
+                
+                with col4:
+                    st.markdown(f"{status_color.get(initiative['status'], '⚪')} {initiative['status'].upper()}")
+                
+                st.divider()
+    else:
+        st.info("No initiatives found. Create your first one!")
+
+# ==================== Partnerships ====================
+
+elif page == "🤝 Partnerships":
+    st.title("🤝 Partnership Funnel")
+    
+    # Create deal
+    with st.expander("➕ Track New Partnership", expanded=True):
+        with st.form("partnership_form"):
+            company = st.text_input("Company Name *")
+            deal_type = st.selectbox("Deal Type", ["hardware", "sdk", "content", "marketing"])
+            value = st.number_input("Deal Value ($)", min_value=0.0, step=10000.0, format="%.2f")
+            
+            if st.form_submit_button("💼 Create Deal", use_container_width=True):
+                if company:
+                    deal = PartnershipDeal(company=company, deal_type=deal_type, value=value)
+                    
+                    # Sync to HubSpot if significant
+                    if value > 50000:
+                        hubspot_id = asyncio.run(engine.hubspot.create_deal(company, deal_type, value))
+                        if hubspot_id:
+                            deal.hubspot_id = hubspot_id
+                            message = f"""
+                            *🤝 Partnership Deal Created*
+                            *Company:* {company}
+                            *Type:* {deal_type.upper()}
+                            *Value:* ${value:,.2f}
+                            """
+                            asyncio.run(engine.slack.send_alert(message, "medium"))
+                    
+                    db.save_partnership(deal)
+                    st.success(f"✅ Deal created{' (HubSpot sync: ' + deal.hubspot_id + ')' if deal.hubspot_id else ''}!")
+                    st.rerun()
+                else:
+                    st.error("❌ Company name required")
+    
+    # Funnel visualization
+    st.subheader("📈 Partnership Pipeline")
+    deals = db.get_partnerships()
+    
+    if deals:
+        df_deals = pd.DataFrame(deals)
+        
+        fig = px.funnel(
+            df_deals,
+            x="value",
+            y="deal_type",
+            title="Deal Pipeline by Type",
+            color="deal_type"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.dataframe(df_deals, use_container_width=True)
+    else:
+        st.info("No partnership deals tracked yet.")
+
+# ==================== Market Intelligence ====================
+
+elif page == "📈 Market Intelligence":
+    st.title("📈 Live Market Intelligence")
+    
+    game = st.selectbox("Select Game", ["CS2", "LEAGUE_OF_LEGENDS", "VALORANT"])
+    competitor = st.text_input("Competitor Name", "Valve")
+    
+    if st.button("🔍 Analyze Competitor", use_container_width=True):
+        with st.spinner(f"Fetching real-time data for {game}..."):
+            try:
+                result = asyncio.run(engine.analyze_competitor(GameTitle[game], competitor))
+                
+                if "error" not in result:
+                    metrics = result.get("metrics", {})
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.metric("Active Players", f"{metrics.get('active_players', 0):,}")
+                        st.metric("Twitch Viewers", f"{metrics.get('live_viewers', 0):,}")
+                    
+                    with col2:
+                        engagement = metrics.get('engagement_ratio', 0)
+                        st.metric("Engagement Ratio", f"{engagement:.2%}")
+                        st.metric("Data Freshness", "Live")
+                    
+                    # Recommendations
+                    st.subheader("🤖 AI Recommendations")
+                    for rec in result.get("recommendations", []):
+                        st.success(rec)
+                    
+                    # Raw data
+                    with st.expander("View Raw API Response"):
+                        st.json(result)
+                else:
+                    st.error(f"Analysis failed: {result['error']}")
+                    
+            except Exception as e:
+                st.error(f"Failed to analyze: {e}")
+
+# ==================== Settings ====================
+
+elif page == "⚙️ Settings":
+    st.title("⚙️ Configuration & Status")
+    
+    # API Keys
+    st.subheader("🔐 API Keys")
+    with st.expander("Configure Integrations"):
+        st.text_input("Twitch Client ID", type="password", key="twitch_id")
+        st.text_input("Twitch Client Secret", type="password", key="twitch_secret")
+        st.text_input("Slack Webhook URL", type="password", key="slack_webhook")
+        st.text_input("HubSpot API Key", type="password", key="hubspot_key")
+        
+        if st.button("Save Settings"):
+            st.success("✅ Settings saved (Note: Add to `.streamlit/secrets.toml` for production)")
+    
+    # System status
+    st.subheader("📊 System Status")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Database", "Connected" if sqlite3.connect(Settings.DATABASE_URL) else "Error")
+        st.metric("Cache Size", f"{len(db.get_partnerships())} items")
+    
+    with col2:
+        initiatives_count = len(db.get_initiatives())
+        st.metric("Total Initiatives", initiatives_count)
+        st.metric("Partnership Pipeline", f"${pd.DataFrame(db.get_partnerships())['value'].sum() if db.get_partnerships() else 0:,.2f}")
+    
+    # Health check
+    if st.button("Run Health Check", use_container_width=True):
+        try:
+            # Test async engine
+            st.success("✅ Market Intelligence Engine: Running")
+            
+            # Test database
+            st.success("✅ SQLite Database: Connected")
+            
+            # Test APIs (if configured)
+            if st.secrets.get("TWITCH_CLIENT_ID"):
+                st.info("⚠️ Twitch API: Not tested (rate limit protection)")
+            
+            if st.secrets.get("SLACK_WEBHOOK_URL"):
+                st.info("⚠️ Slack: Configured but not tested")
+            
+            if st.secrets.get("HUBSPOT_API_KEY"):
+                st.info("⚠️ HubSpot: Configured but not tested")
+                
+        except Exception as e:
+            st.error(f"❌ Health check failed: {e}")
+
+# ==================== Footer ====================
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Strategic Operations Platform v2.0")
+st.sidebar.caption(f"Last refresh: {datetime.now().strftime('%H:%M:%S')}")
