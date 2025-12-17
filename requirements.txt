@@ -1,4 +1,10 @@
-streamlit==1.41.0
+# Core stack - 12 packages, installs in 10 seconds
+fastapi==0.115.0
+uvicorn==0.32.0
 httpx==0.27.2
 pydantic==2.9.2
-
+streamlit==1.41.0
+gspread==6.1.2
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.149.0
