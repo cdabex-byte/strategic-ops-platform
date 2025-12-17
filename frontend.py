@@ -127,7 +127,7 @@ def store_review(item_type: str, item_id: str, content: Dict[str, Any], reviewer
         )
         st.error(f"❌ Failed to store review: {e}")
     finally:
-        conn.close())
+        conn.close()
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def get_pending_reviews() -> List[Dict[str, Any]]:
