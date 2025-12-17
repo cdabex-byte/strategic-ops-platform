@@ -751,3 +751,19 @@ if st.sidebar.button("🔥 Full System Test"):
         st.sidebar.success(f"✅ SQLite working ({len(reviews)} reviews)")
     except Exception as e:
         st.sidebar.error(f"❌ SQLite failed: {e}")
+# Add to sidebar debug panel:
+if st.sidebar.button("🔍 Check Gemini 2.5 Access"):
+    try:
+        import requests
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash?key={st.secrets['GEMINI_API_KEY']}"
+        response = requests.get(url)
+        st.sidebar.write("Status:", response.status_code)
+        st.sidebar.write("Response:", response.text[:300])
+        
+        if response.status_code == 200:
+            st.sidebar.success("✅ Your API key has access to Gemini 2.5 Flash!")
+        else:
+            st.sidebar.error("❌ No access. You may need to upgrade or use a different key.")
+            
+    except Exception as e:
+        st.sidebar.error(f"❌ Check failed: {e}")
