@@ -1200,9 +1200,4 @@ if "initialized" not in st.session_state:
     st.sidebar.success("✅ Platform initialized")
     if not ai_engine.configured:
         st.sidebar.warning("⚠️ Add GEMINI_API_KEY in secrets.toml for full AI features")
-```
 
-
----
-
-**If you still see errors after this, your file is corrupted. Delete it completely and create a fresh one with this code.**
