@@ -214,98 +214,76 @@ class TAMAnalysis(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
 
 # ============================================================================
-# AI ENGINES - Gemini 2.5 Flash (With Defensive Parsing)
+# AI ENGINES - Gemini 2.5 Flash (No Safety Settings)
 # ============================================================================
 
 class MarketIntelligenceEngine:
     def __init__(self):
         self.gemini_key = st.secrets.get("GEMINI_API_KEY", "")
         self.enabled = bool(self.gemini_key)
-        
-        # ✅ CORRECT: v1 + gemini-2.5-flash
         self.api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
     
     async def analyze_competitor(self, competitor: str, game: GameTitle) -> CompetitiveInsight:
         if not self.enabled:
             return self._get_fallback(competitor, game, "API disabled")
         
-        # ✅ Simple, direct prompt
+        # ✅ Simple, clean prompt (no safety settings needed)
         prompt = f"""
-        Analyze {competitor} in {game} AI coaching.
-        Return ONLY JSON with: key_strengths, key_weaknesses, market_position, 
-        threat_level, opportunity_windows, confidence_score, sources.
+        Analyze {competitor} in the {game} AI coaching market.
+        
+        Return ONLY this JSON format:
+        {{
+          "key_strengths": ["strength1", "strength2"],
+          "key_weaknesses": ["weakness1", "weakness2"],
+          "market_position": "challenger",
+          "threat_level": 6,
+          "opportunity_windows": ["Mobile", "Esports"],
+          "confidence_score": 0.7,
+          "sources": ["SteamSpy"]
+        }}
         """
         
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     self.api_url,
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "safetySettings": [
-                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_SEXUAL", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
-                        ]
-                    },
+                    json={"contents": [{"parts": [{"text": prompt}]}]},  # ✅ No safetySettings
                     timeout=30.0
                 )
                 
-                # ✅ Handle empty/non-JSON responses
-                raw_text = response.text.strip()
-                if not raw_text:
-                    raise Exception("Empty API response")
-                
                 if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}: {raw_text}")
+                    raise Exception(f"HTTP {response.status_code}: {response.text}")
                 
-                try:
-                    data = json.loads(raw_text)
-                except:
-                    raise Exception(f"Invalid JSON: {raw_text[:100]}")
-                
-                # ✅ Extract text defensively
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    raise Exception("No candidates")
-                
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-                if not parts:
-                    raise Exception("No parts")
-                
-                text = parts[0].get("text", "")
-                if not text:
-                    raise Exception("Empty text")
-                
-                # ✅ Parse JSON from text
-                cleaned = text.strip()
-                if "```json" in cleaned:
-                    cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-                
+                data = response.json()
+                content = data["candidates"][0]["content"]["parts"][0]["text"]
+                cleaned = content.replace('```json', '').replace('```', '').strip()
                 analysis = json.loads(cleaned)
                 
                 return CompetitiveInsight(
                     competitor_name=competitor,
                     game=game,
-                    key_strengths=analysis.get("key_strengths", ["N/A", "N/A"])[:2],
-                    key_weaknesses=analysis.get("key_weaknesses", ["N/A", "N/A"])[:2],
-                    market_position=analysis.get("market_position", "unknown"),
-                    threat_level=max(1, min(10, int(analysis.get("threat_level", 5)))),
-                    opportunity_windows=analysis.get("opportunity_windows", ["N/A", "N/A"])[:2],
-                    confidence_score=max(0.0, min(1.0, float(analysis.get("confidence_score", 0.5)))),
-                    sources=analysis.get("sources", ["Mock"])[:2],
+                    key_strengths=analysis["key_strengths"][:3],
+                    key_weaknesses=analysis["key_weaknesses"][:3],
+                    market_position=analysis["market_position"],
+                    threat_level=min(10, max(1, analysis["threat_level"])),
+                    opportunity_windows=analysis["opportunity_windows"][:3],
+                    confidence_score=min(1.0, max(0.0, analysis["confidence_score"])),
+                    sources=analysis["sources"][:2],
                 )
                 
         except Exception as e:
-            error_msg = f"⚠️ AI failed: {str(e)}"
-            print(error_msg)
-            st.warning(error_msg)
-            
+            logger.log(
+                user="system",
+                action="ai_analysis_failed",
+                input_data={"competitor": competitor, "game": game},
+                status="error",
+                error=str(e),
+                session_id=st.session_state.session_id
+            )
             return self._get_fallback(competitor, game, str(e))
     
     def _get_fallback(self, competitor: str, game: GameTitle, error: str) -> CompetitiveInsight:
+        st.warning(f"Using fallback: {error[:50]}")
         return CompetitiveInsight(
             competitor_name=competitor,
             game=game,
@@ -329,7 +307,7 @@ class OpportunitySizer:
             return self._get_fallback(game, segment, "API disabled")
         
         prompt = f"""
-        Market analysis: {game}, {segment}, {tier}, {geo}.
+        Market analysis for {game}, {segment}, {tier}, {geo}.
         Return ONLY JSON with arpu, segment_penetration, confidence_score.
         """
         
@@ -337,18 +315,14 @@ class OpportunitySizer:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     self.api_url,
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},  # ✅ No safetySettings
                     timeout=30.0
                 )
                 
-                raw_text = response.text.strip()
-                if not raw_text:
-                    raise Exception("Empty response")
-                
                 if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}: {raw_text}")
+                    raise Exception(f"HTTP {response.status_code}: {response.text}")
                 
-                data = json.loads(raw_text)
+                data = response.json()
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
                 cleaned = text.strip().split("```json")[-1].split("```")[0].strip()
                 assumptions = json.loads(cleaned)
@@ -371,10 +345,18 @@ class OpportunitySizer:
                     som_usd=som,
                     growth_rate=0.10,
                     assumptions=assumptions,
-                    confidence_score=max(0.0, min(1.0, float(assumptions.get("confidence_score", 0.6)))),
+                    confidence_score=max(0.0, min(1.0, assumptions.get("confidence_score", 0.6))),
                 )
                 
         except Exception as e:
+            logger.log(
+                user="system",
+                action="tam_calculation_failed",
+                input_data={"game": game, "segment": segment},
+                status="error",
+                error=str(e)[:200],
+                session_id=st.session_state.session_id
+            )
             return self._get_fallback(game, segment, str(e))
     
     def _get_fallback(self, game: GameTitle, segment: str, error: str) -> TAMAnalysis:
