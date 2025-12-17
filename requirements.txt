@@ -6,4 +6,3 @@ numpy>=1.26.0
 plotly>=5.17.0
 rich>=13.9.4
 google-generativeai>=0.8.0
-typing-extensions>=4.8.0
