@@ -1,4 +1,15 @@
-
+# DEBUG: Verify line 777 is clean
+import sys
+with open(__file__, 'r') as f:
+    lines = f.readlines()
+    line777 = lines[776] if len(lines) > 776 else "N/A"
+    # Check for non-ASCII characters
+    if any(ord(c) > 127 for c in line777):
+        st.error(f"❌ Line 777 contains non-ASCII: {repr(line777)}")
+        st.stop()
+    else:
+        print(f"✅ Line 777 is clean: {line777}")
+        
 import streamlit as st
 import asyncio
 import httpx
